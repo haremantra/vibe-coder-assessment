@@ -49,3 +49,33 @@
 - [x] Add confidence adjustment based on artifact consistency
 - [x] Show verification status on results page
 - [x] Write vitest tests for artifact verification
+
+## Feature 4: In-App Notification Center + Downloadable Summary
+- [x] Add notifications table to drizzle schema
+- [x] Add milestone_progress table to drizzle schema (for Feature 5)
+- [x] Push DB migrations
+- [x] Add notification query helpers to db.ts
+- [x] Add notification tRPC endpoints (list, markRead, markAllRead, unreadCount)
+- [x] Build NotificationBell component (header icon with unread count + dropdown panel)
+- [x] Fire notification on assessment completion (wired in assessment.save)
+- [x] Add "Download Summary" button to History page (generates markdown)
+- [x] Write vitest tests for notification endpoints
+
+## Feature 5: Phase-Gated Milestone Tracker
+- [x] Add milestone progress tRPC endpoints (init, getByAssessment, toggle, phaseStatus)
+- [x] Build MilestoneTracker page with phase-gated UI
+- [x] Phase-gated UI: lock next phase until current is complete
+- [x] Fire notification on phase completion (wired in milestone.toggle)
+- [x] Fire "Time to reassess" notification on full plan completion
+- [x] Progress bar per phase and overall
+- [x] Link from History page ("Track Progress" button)
+- [x] Write vitest tests for milestone endpoints
+
+## Feature 6: Compare Over Time (Small Multiples)
+- [x] Build CompareOverTime page with small multiples sparklines (recharts)
+- [x] Add route to App.tsx (/compare)
+- [x] Link from History page ("Compare Over Time" button, shown when 2+ assessments)
+- [x] One sparkline per attribute showing score trend
+- [x] Composite score line chart with tier boundary reference lines
+- [x] Delta badges showing change vs. previous assessment
+- [x] Empty state handling for 0 or 1 assessment

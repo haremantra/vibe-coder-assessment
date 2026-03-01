@@ -15,7 +15,11 @@ import {
   getAssessmentById,
   updateAssessmentArtifact,
   updateAssessmentGrowthPlan,
+  createNotification,
 } from "./db";
+import { getDb } from "./db";
+import { assessments } from "../drizzle/schema";
+import { eq, desc } from "drizzle-orm";
 import { storagePut } from "./storage";
 
 const RUBRIC_CONTEXT = `
@@ -368,7 +372,25 @@ ${transcript}`,
         transcript: input.transcript,
       });
 
-      return { shareToken: result.shareToken };
+      // Look up the assessment ID for the notification
+      const db = await getDb();
+      let assessmentId: number | undefined;
+      if (db) {
+        const saved = await db.select({ id: assessments.id }).from(assessments).where(eq(assessments.shareToken, shareToken)).limit(1);
+        assessmentId = saved[0]?.id;
+      }
+
+      // Fire assessment completion notification
+      await createNotification({
+        userId: ctx.user.id,
+        type: "assessment_complete",
+        title: `Assessment Complete: ${input.evaluation.compositeTier}`,
+        body: `You scored ${input.evaluation.compositeScore}/32 (${input.evaluation.compositeTier} tier). View your results and generate a personalized growth plan.`,
+        actionUrl: `/share/${shareToken}`,
+        assessmentId: assessmentId ?? null,
+      });
+
+      return { shareToken: result.shareToken, assessmentId };
     }),
 
   // ── Update growth plan on an existing assessment ──
@@ -396,6 +418,8 @@ ${transcript}`,
         compositeTier: r.compositeTier,
         createdAt: r.createdAt,
         artifactVerified: r.artifactVerified,
+        growthPlanJson: r.growthPlanJson,
+        scoresJson: r.scoresJson,
       }));
     }),
 

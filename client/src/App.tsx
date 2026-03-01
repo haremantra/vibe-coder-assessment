@@ -11,6 +11,8 @@ import GrowthPlan from "./pages/GrowthPlan";
 import ChatAssessment from "./pages/ChatAssessment";
 import SharedResults from "./pages/SharedResults";
 import History from "./pages/History";
+import MilestoneTracker from "./pages/MilestoneTracker";
+import CompareOverTime from "./pages/CompareOverTime";
 
 function Router() {
   return (
@@ -22,6 +24,8 @@ function Router() {
       <Route path={"/growth-plan"} component={GrowthPlan} />
       <Route path={"/share/:token"} component={SharedResults} />
       <Route path={"/history"} component={History} />
+      <Route path={"/milestones"} component={MilestoneTracker} />
+      <Route path={"/compare"} component={CompareOverTime} />
       <Route path={"/404"} component={NotFound} />
       <Route component={NotFound} />
     </Switch>

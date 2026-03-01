@@ -8,7 +8,8 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { useLocation } from "wouter";
 import { motion } from "framer-motion";
-import { Activity, Target, TrendingUp, Zap, ChevronRight, BarChart3, Clock } from "lucide-react";
+import { Activity, Target, TrendingUp, Zap, ChevronRight, BarChart3, Clock, History as HistoryIcon } from "lucide-react";
+import NotificationBell from "@/components/NotificationBell";
 
 const HERO_BG = "https://d2xsxph8kpxj0f.cloudfront.net/310519663361461713/98UuH5CAArJboW7zFiG9Jf/hero-bg-mQnMxxC4o5u54FBjgrpBvR.webp";
 const GAUGE_IMG = "https://d2xsxph8kpxj0f.cloudfront.net/310519663361461713/98UuH5CAArJboW7zFiG9Jf/gauge-pattern-5rg4TUmaGwWpee8NdZ8Us2.webp";
@@ -36,6 +37,30 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
+      {/* Fixed Header */}
+      <header className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-md border-b border-border/30">
+        <div className="container flex items-center justify-between h-14">
+          <button onClick={() => navigate("/")} className="font-display text-sm font-bold tracking-tight text-foreground flex items-center gap-2">
+            <Activity className="w-4 h-4 text-primary" />
+            Vibe Coder Assessment
+          </button>
+          <div className="flex items-center gap-2">
+            {isAuthenticated && (
+              <>
+                <button
+                  onClick={() => navigate("/history")}
+                  className="p-2 rounded-lg hover:bg-secondary transition-colors"
+                  aria-label="Assessment History"
+                >
+                  <HistoryIcon className="w-5 h-5 text-muted-foreground" />
+                </button>
+                <NotificationBell />
+              </>
+            )}
+          </div>
+        </div>
+      </header>
+
       {/* Hero Section */}
       <section className="relative min-h-[90vh] flex items-center overflow-hidden">
         {/* Background image with overlay */}

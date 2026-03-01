@@ -1,6 +1,6 @@
 /**
  * History — Assessment history page showing all past assessments
- * Protected route — requires authentication
+ * Links to MilestoneTracker, CompareOverTime, and SharedResults
  */
 
 import { useLocation } from "wouter";
@@ -9,6 +9,7 @@ import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { getLoginUrl } from "@/const";
 import { Button } from "@/components/ui/button";
+import NotificationBell from "@/components/NotificationBell";
 import {
   Loader2,
   Activity,
@@ -21,6 +22,11 @@ import {
   Copy,
   Check,
   ExternalLink,
+  TrendingUp,
+  ListChecks,
+  BarChart3,
+  History as HistoryIcon,
+  Download,
 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -56,6 +62,82 @@ function getVerificationIcon(status: string) {
     default:
       return null;
   }
+}
+
+function generateSummaryMarkdown(assessment: any): string {
+  const scores = (assessment.scoresJson as any[]) || [];
+  const date = new Date(assessment.createdAt).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+
+  let md = `# Vibe Coder Assessment Summary\n\n`;
+  md += `**Date:** ${date}\n`;
+  md += `**Composite Score:** ${assessment.compositeScore}/32\n`;
+  md += `**Maturity Tier:** ${assessment.compositeTier}\n\n`;
+  md += `---\n\n`;
+  md += `## Attribute Scores\n\n`;
+  md += `| Attribute | Score | Tier |\n`;
+  md += `|-----------|-------|------|\n`;
+
+  const tierLabel = (s: number) => {
+    if (s <= 1) return "Novice";
+    if (s <= 2) return "Practitioner";
+    if (s <= 3) return "Senior";
+    return "Principal";
+  };
+
+  scores.forEach((s: any) => {
+    md += `| ${s.attribute} | ${s.score}/4 | ${tierLabel(s.score)} |\n`;
+  });
+
+  md += `\n---\n\n`;
+  md += `## Evidence & Reasoning\n\n`;
+  scores.forEach((s: any) => {
+    md += `### ${s.attribute} (${s.score}/4)\n\n`;
+    md += `**Evidence:** ${s.evidence}\n\n`;
+    md += `**Reasoning:** ${s.reasoning}\n\n`;
+  });
+
+  if (assessment.growthPlanJson) {
+    const plan = assessment.growthPlanJson as any;
+    md += `---\n\n## Growth Plan\n\n`;
+    const phases = plan.phases || [];
+    phases.forEach((p: any, i: number) => {
+      const labels = ["0-30 Days", "30-60 Days", "60-90 Days"];
+      md += `### ${labels[i]}: ${p.title}\n\n`;
+      md += `${p.description}\n\n`;
+      md += `**Deliverables:**\n`;
+      (p.deliverables || []).forEach((d: string) => {
+        md += `- [ ] ${d}\n`;
+      });
+      md += `\n**Success Criteria:**\n`;
+      (p.successCriteria || []).forEach((c: string) => {
+        md += `- ${c}\n`;
+      });
+      md += `\n`;
+    });
+  }
+
+  md += `---\n\n`;
+  md += `*Share link: ${window.location.origin}/share/${assessment.shareToken}*\n`;
+
+  return md;
+}
+
+function downloadSummary(assessment: any) {
+  const md = generateSummaryMarkdown(assessment);
+  const blob = new Blob([md], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `vibe-coder-assessment-${assessment.compositeTier.toLowerCase()}-${new Date(assessment.createdAt).toISOString().split("T")[0]}.md`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast.success("Summary downloaded");
 }
 
 export default function History() {
@@ -102,19 +184,71 @@ export default function History() {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <div className="container max-w-4xl py-8">
-        {/* Header */}
-        <div className="flex items-center gap-3 mb-8">
-          <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
-            <ArrowLeft className="w-5 h-5" />
-          </Button>
-          <div>
-            <h1 className="font-display text-2xl font-bold">Assessment History</h1>
-            <p className="text-sm text-muted-foreground">
-              {user?.name ? `${user.name}'s` : "Your"} past assessments
-            </p>
+      {/* Header */}
+      <header className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-md border-b border-border/30">
+        <div className="container flex items-center justify-between h-14">
+          <button
+            onClick={() => navigate("/")}
+            className="font-display text-sm font-bold tracking-tight text-foreground flex items-center gap-2"
+          >
+            <Activity className="w-4 h-4 text-primary" />
+            Vibe Coder Assessment
+          </button>
+          <div className="flex items-center gap-2">
+            <NotificationBell />
           </div>
         </div>
+      </header>
+
+      <div className="container max-w-4xl pt-20 pb-8">
+        {/* Page Header */}
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
+              <ArrowLeft className="w-5 h-5" />
+            </Button>
+            <div>
+              <h1 className="font-display text-2xl font-bold">Assessment History</h1>
+              <p className="text-sm text-muted-foreground">
+                {user?.name ? `${user.name}'s` : "Your"} past assessments
+              </p>
+            </div>
+          </div>
+
+          {/* Quick Actions */}
+          {assessments && assessments.length >= 2 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("/compare")}
+              className="hidden sm:flex"
+            >
+              <TrendingUp className="w-4 h-4 mr-1.5" />
+              Compare Over Time
+            </Button>
+          )}
+        </div>
+
+        {/* Compare Over Time banner (mobile + when 2+ assessments) */}
+        {assessments && assessments.length >= 2 && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="rounded-xl border border-primary/20 bg-primary/5 p-4 mb-6 cursor-pointer hover:border-primary/40 transition-colors sm:hidden"
+            onClick={() => navigate("/compare")}
+          >
+            <div className="flex items-center gap-3">
+              <BarChart3 className="w-5 h-5 text-primary shrink-0" />
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-foreground">Compare Over Time</p>
+                <p className="text-xs text-muted-foreground">
+                  See how your scores have changed across {assessments.length} assessments
+                </p>
+              </div>
+              <ChevronRight className="w-4 h-4 text-primary" />
+            </div>
+          </motion.div>
+        )}
 
         {isLoading ? (
           <div className="flex items-center justify-center py-20">
@@ -132,16 +266,19 @@ export default function History() {
           </div>
         ) : (
           <div className="space-y-4">
-            {assessments.map((a, i) => (
+            {assessments.map((a: any, i: number) => (
               <motion.div
                 key={a.id}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: i * 0.05 }}
-                className={`rounded-xl border p-5 ${getTierBg(a.compositeTier)} hover:border-primary/30 transition-all cursor-pointer`}
-                onClick={() => navigate(`/share/${a.shareToken}`)}
+                className={`rounded-xl border p-5 ${getTierBg(a.compositeTier)} hover:border-primary/30 transition-all`}
               >
-                <div className="flex items-center justify-between">
+                {/* Main row — clickable to view results */}
+                <div
+                  className="flex items-center justify-between cursor-pointer"
+                  onClick={() => navigate(`/share/${a.shareToken}`)}
+                >
                   <div className="flex items-center gap-4">
                     <div className="text-center">
                       <p className={`font-display text-2xl font-bold ${getTierColor(a.compositeTier)}`}>
@@ -169,24 +306,53 @@ export default function History() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <ExternalLink className="w-4 h-4 text-muted-foreground shrink-0" />
+                </div>
+
+                {/* Action buttons row */}
+                <div className="flex items-center gap-2 mt-3 pt-3 border-t border-border/20">
+                  {a.growthPlanJson && (
                     <Button
                       variant="ghost"
-                      size="icon"
-                      className="h-8 w-8"
+                      size="sm"
+                      className="h-7 text-xs"
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleCopyShareLink(a.shareToken);
+                        navigate(`/milestones?id=${a.id}`);
                       }}
                     >
-                      {copiedToken === a.shareToken ? (
-                        <Check className="w-4 h-4 text-emerald-400" />
-                      ) : (
-                        <Copy className="w-4 h-4" />
-                      )}
+                      <ListChecks className="w-3.5 h-3.5 mr-1" />
+                      Track Progress
                     </Button>
-                    <ExternalLink className="w-4 h-4 text-muted-foreground" />
-                  </div>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCopyShareLink(a.shareToken);
+                    }}
+                  >
+                    {copiedToken === a.shareToken ? (
+                      <Check className="w-3.5 h-3.5 mr-1 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5 mr-1" />
+                    )}
+                    Share
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      downloadSummary(a);
+                    }}
+                  >
+                    <Download className="w-3.5 h-3.5 mr-1" />
+                    Download
+                  </Button>
                 </div>
               </motion.div>
             ))}

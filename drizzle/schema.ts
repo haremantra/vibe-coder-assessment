@@ -1,17 +1,10 @@
-import { int, json, mysqlEnum, mysqlTable, text, timestamp, varchar } from "drizzle-orm/mysql-core";
+import { boolean, int, json, mysqlEnum, mysqlTable, text, timestamp, varchar } from "drizzle-orm/mysql-core";
 
 /**
  * Core user table backing auth flow.
- * Extend this file with additional tables as your product grows.
- * Columns use camelCase to match both database fields and generated types.
  */
 export const users = mysqlTable("users", {
-  /**
-   * Surrogate primary key. Auto-incremented numeric value managed by the database.
-   * Use this for relations between tables.
-   */
   id: int("id").autoincrement().primaryKey(),
-  /** Manus OAuth identifier (openId) returned from the OAuth callback. Unique per user. */
   openId: varchar("openId", { length: 64 }).notNull().unique(),
   name: text("name"),
   email: varchar("email", { length: 320 }),
@@ -27,39 +20,75 @@ export type InsertUser = typeof users.$inferInsert;
 
 /**
  * Assessment results table.
- * Stores the full evaluation from the chat assessment flow.
- * Per-attribute scores stored as JSON; composite score/tier as first-class columns for querying.
  */
 export const assessments = mysqlTable("assessments", {
   id: int("id").autoincrement().primaryKey(),
-  /** Foreign key to users table */
   userId: int("userId").notNull(),
-  /** Unique share token for public sharing (not the user ID for privacy) */
   shareToken: varchar("shareToken", { length: 32 }).notNull().unique(),
-  /** Composite score (8-32) */
   compositeScore: int("compositeScore").notNull(),
-  /** Overall maturity tier */
   compositeTier: varchar("compositeTier", { length: 32 }).notNull(),
-  /** LLM-generated narrative summary */
   narrative: text("narrative").notNull(),
-  /** Top strengths identified */
   topStrengths: json("topStrengths").notNull(),
-  /** Critical gaps identified */
   criticalGaps: json("criticalGaps").notNull(),
-  /** Per-attribute scores array: [{attribute, score, evidence, reasoning}] */
   scoresJson: json("scoresJson").notNull(),
-  /** Full growth plan JSON */
   growthPlanJson: json("growthPlanJson"),
-  /** Full interview transcript */
   transcript: text("transcript").notNull(),
-  /** Optional: uploaded artifact text for verification */
   artifactText: text("artifactText"),
-  /** Artifact verification status */
   artifactVerified: mysqlEnum("artifactVerified", ["none", "consistent", "discrepancies", "insufficient"]).default("none").notNull(),
-  /** Artifact verification details from LLM */
   verificationDetails: text("verificationDetails"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
 export type Assessment = typeof assessments.$inferSelect;
 export type InsertAssessment = typeof assessments.$inferInsert;
+
+/**
+ * In-app notifications table.
+ * Stores notifications for users (assessment complete, phase complete, reassess reminder).
+ */
+export const notifications = mysqlTable("notifications", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  /** Notification type for filtering and icon selection */
+  type: mysqlEnum("type", [
+    "assessment_complete",
+    "phase_complete",
+    "plan_complete",
+    "reassess_reminder",
+  ]).notNull(),
+  title: varchar("title", { length: 256 }).notNull(),
+  body: text("body").notNull(),
+  /** Optional link to navigate to when notification is clicked */
+  actionUrl: varchar("actionUrl", { length: 512 }),
+  /** Optional reference to an assessment */
+  assessmentId: int("assessmentId"),
+  isRead: boolean("isRead").default(false).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type Notification = typeof notifications.$inferSelect;
+export type InsertNotification = typeof notifications.$inferInsert;
+
+/**
+ * Milestone progress tracking for growth plan phases.
+ * Each row tracks one milestone within one phase of one assessment's growth plan.
+ */
+export const milestoneProgress = mysqlTable("milestone_progress", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  /** Reference to the assessment whose growth plan this tracks */
+  assessmentId: int("assessmentId").notNull(),
+  /** Phase index (0 = 0-30 days, 1 = 30-60 days, 2 = 60-90 days) */
+  phaseIndex: int("phaseIndex").notNull(),
+  /** Milestone index within the phase */
+  milestoneIndex: int("milestoneIndex").notNull(),
+  /** The milestone text (denormalized for display without loading full growth plan) */
+  milestoneText: text("milestoneText").notNull(),
+  /** Whether this milestone is completed */
+  completed: boolean("completed").default(false).notNull(),
+  completedAt: timestamp("completedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type MilestoneProgress = typeof milestoneProgress.$inferSelect;
+export type InsertMilestoneProgress = typeof milestoneProgress.$inferInsert;
