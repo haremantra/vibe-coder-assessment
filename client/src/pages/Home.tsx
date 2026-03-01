@@ -4,6 +4,7 @@
  * Dark navy background, luminous cyan accents, precision typography
  */
 
+import { useAuth } from "@/_core/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { useLocation } from "wouter";
 import { motion } from "framer-motion";
@@ -27,6 +28,10 @@ const tiers = [
 ];
 
 export default function Home() {
+  // The userAuth hooks provides authentication state
+  // To implement login/logout functionality, simply call logout() or redirect to getLoginUrl()
+  let { user, loading, error, isAuthenticated, logout } = useAuth();
+
   const [, navigate] = useLocation();
 
   return (
@@ -75,20 +80,28 @@ export default function Home() {
               <div className="flex flex-wrap gap-4 items-center">
                 <Button
                   size="lg"
-                  onClick={() => navigate("/assess")}
+                  onClick={() => navigate("/chat-assess")}
                   className="bg-primary text-primary-foreground hover:bg-primary/90 glow-cyan font-display text-base px-8 h-12"
                 >
-                  Begin Assessment
+                  Start Interview Assessment
                   <ChevronRight className="w-4 h-4 ml-1" />
                 </Button>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Clock className="w-4 h-4" />
-                  <span className="font-mono">15-25 min</span>
-                  <span className="mx-2 text-border">|</span>
-                  <span className="font-mono">8 attributes</span>
-                  <span className="mx-2 text-border">|</span>
-                  <span className="font-mono">Score 8-32</span>
-                </div>
+                <Button
+                  size="lg"
+                  variant="outline"
+                  onClick={() => navigate("/assess")}
+                  className="font-display text-base px-6 h-12 border-primary/30 text-primary hover:bg-primary/10"
+                >
+                  Quick Self-Score
+                </Button>
+              </div>
+              <div className="flex items-center gap-2 text-sm text-muted-foreground mt-3">
+                <Clock className="w-4 h-4" />
+                <span className="font-mono">15-25 min</span>
+                <span className="mx-2 text-border">|</span>
+                <span className="font-mono">8 attributes</span>
+                <span className="mx-2 text-border">|</span>
+                <span className="font-mono">Score 8-32</span>
               </div>
             </motion.div>
 
@@ -295,18 +308,28 @@ export default function Home() {
               Ready to Calibrate?
             </h2>
             <p className="text-muted-foreground max-w-lg mx-auto mb-8">
-              The assessment takes 15-25 minutes. Be honest about your actual
-              practice, not your aspirational practice. Maturity is about reliable,
-              repeatable behavior.
+              The interview assessment takes 15-25 minutes. Answer questions about
+              a real project — your responses are evaluated against the rubric by AI.
+              No self-labeling, no confirmation bias.
             </p>
-            <Button
-              size="lg"
-              onClick={() => navigate("/assess")}
-              className="bg-primary text-primary-foreground hover:bg-primary/90 glow-cyan font-display text-base px-10 h-12"
-            >
-              Start Self-Assessment
-              <ChevronRight className="w-4 h-4 ml-1" />
-            </Button>
+            <div className="flex flex-wrap gap-4 justify-center">
+              <Button
+                size="lg"
+                onClick={() => navigate("/chat-assess")}
+                className="bg-primary text-primary-foreground hover:bg-primary/90 glow-cyan font-display text-base px-10 h-12"
+              >
+                Start Interview Assessment
+                <ChevronRight className="w-4 h-4 ml-1" />
+              </Button>
+              <Button
+                size="lg"
+                variant="outline"
+                onClick={() => navigate("/assess")}
+                className="font-display text-base px-6 h-12 border-primary/30 text-primary hover:bg-primary/10"
+              >
+                Quick Self-Score
+              </Button>
+            </div>
           </motion.div>
         </div>
       </section>

@@ -8,12 +8,14 @@ import Home from "./pages/Home";
 import Assessment from "./pages/Assessment";
 import Results from "./pages/Results";
 import GrowthPlan from "./pages/GrowthPlan";
-
+import ChatAssessment from "./pages/ChatAssessment";
 function Router() {
+  // make sure to consider if you need authentication for certain routes
   return (
     <Switch>
       <Route path={"/"} component={Home} />
       <Route path={"/assess"} component={Assessment} />
+      <Route path={"/chat-assess"} component={ChatAssessment} />
       <Route path={"/results"} component={Results} />
       <Route path={"/growth-plan"} component={GrowthPlan} />
       <Route path={"/404"} component={NotFound} />
