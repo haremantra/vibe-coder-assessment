@@ -1,11 +1,22 @@
 /**
  * Assessment evaluation router
  * Takes interview transcript → LLM evaluates against rubric → returns scores + personalized growth plan
+ * Also handles: save to DB, history, public sharing, artifact verification
  */
 
 import { z } from "zod";
-import { publicProcedure, router } from "./_core/trpc";
+import { nanoid } from "nanoid";
+import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { invokeLLM } from "./_core/llm";
+import {
+  saveAssessment,
+  getAssessmentsByUser,
+  getAssessmentByShareToken,
+  getAssessmentById,
+  updateAssessmentArtifact,
+  updateAssessmentGrowthPlan,
+} from "./db";
+import { storagePut } from "./storage";
 
 const RUBRIC_CONTEXT = `
 # Vibe Coder Self-Assessment Rubric: Attribute-Maturity Matrix
@@ -156,7 +167,75 @@ const growthPlanSchema = {
   additionalProperties: false,
 };
 
+const verificationSchema = {
+  type: "object" as const,
+  properties: {
+    status: {
+      type: "string" as const,
+      enum: ["consistent", "discrepancies", "insufficient"],
+      description: "Overall verification status",
+    },
+    summary: {
+      type: "string" as const,
+      description: "2-3 sentence summary of the verification findings",
+    },
+    consistentClaims: {
+      type: "array" as const,
+      items: { type: "string" as const },
+      description: "Claims from the interview that are supported by the artifact",
+    },
+    discrepancies: {
+      type: "array" as const,
+      items: {
+        type: "object" as const,
+        properties: {
+          claim: { type: "string" as const, description: "What the user claimed in the interview" },
+          artifact: { type: "string" as const, description: "What the artifact actually shows" },
+          impact: { type: "string" as const, description: "Which attribute score this affects and how" },
+        },
+        required: ["claim", "artifact", "impact"] as const,
+        additionalProperties: false,
+      },
+      description: "Claims that contradict or are not supported by the artifact",
+    },
+    scoreAdjustments: {
+      type: "array" as const,
+      items: {
+        type: "object" as const,
+        properties: {
+          attribute: { type: "string" as const },
+          originalScore: { type: "integer" as const },
+          adjustedScore: { type: "integer" as const },
+          reason: { type: "string" as const },
+        },
+        required: ["attribute", "originalScore", "adjustedScore", "reason"] as const,
+        additionalProperties: false,
+      },
+      description: "Suggested score adjustments based on artifact evidence",
+    },
+  },
+  required: ["status", "summary", "consistentClaims", "discrepancies", "scoreAdjustments"] as const,
+  additionalProperties: false,
+};
+
+// ── Shared Zod schemas for reuse ──
+
+const evaluationZod = z.object({
+  scores: z.array(z.object({
+    attribute: z.string(),
+    score: z.number(),
+    evidence: z.string(),
+    reasoning: z.string(),
+  })),
+  compositeScore: z.number(),
+  compositeTier: z.string(),
+  narrative: z.string(),
+  topStrengths: z.array(z.string()),
+  criticalGaps: z.array(z.string()),
+});
+
 export const assessmentRouter = router({
+  // ── Evaluate transcript against rubric ──
   evaluate: publicProcedure
     .input(z.object({
       transcript: z.string().min(50, "Transcript too short"),
@@ -207,22 +286,11 @@ ${transcript}`,
       return JSON.parse(content);
     }),
 
+  // ── Generate personalized growth plan ──
   generateGrowthPlan: publicProcedure
     .input(z.object({
       transcript: z.string(),
-      evaluation: z.object({
-        scores: z.array(z.object({
-          attribute: z.string(),
-          score: z.number(),
-          evidence: z.string(),
-          reasoning: z.string(),
-        })),
-        compositeScore: z.number(),
-        compositeTier: z.string(),
-        narrative: z.string(),
-        topStrengths: z.array(z.string()),
-        criticalGaps: z.array(z.string()),
-      }),
+      evaluation: evaluationZod,
     }))
     .mutation(async ({ input }) => {
       const { transcript, evaluation } = input;
@@ -275,5 +343,168 @@ ${transcript}`,
       }
 
       return JSON.parse(content);
+    }),
+
+  // ── Save assessment to database ──
+  save: protectedProcedure
+    .input(z.object({
+      transcript: z.string(),
+      evaluation: evaluationZod,
+      growthPlan: z.any().optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const shareToken = nanoid(16);
+
+      const result = await saveAssessment({
+        userId: ctx.user.id,
+        shareToken,
+        compositeScore: input.evaluation.compositeScore,
+        compositeTier: input.evaluation.compositeTier,
+        narrative: input.evaluation.narrative,
+        topStrengths: input.evaluation.topStrengths,
+        criticalGaps: input.evaluation.criticalGaps,
+        scoresJson: input.evaluation.scores,
+        growthPlanJson: input.growthPlan ?? null,
+        transcript: input.transcript,
+      });
+
+      return { shareToken: result.shareToken };
+    }),
+
+  // ── Update growth plan on an existing assessment ──
+  updateGrowthPlan: protectedProcedure
+    .input(z.object({
+      shareToken: z.string(),
+      growthPlan: z.any(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const assessment = await getAssessmentByShareToken(input.shareToken);
+      if (!assessment) throw new Error("Assessment not found");
+      if (assessment.userId !== ctx.user.id) throw new Error("Not authorized");
+      await updateAssessmentGrowthPlan(assessment.id, input.growthPlan);
+      return { success: true };
+    }),
+
+  // ── List user's assessment history ──
+  history: protectedProcedure
+    .query(async ({ ctx }) => {
+      const results = await getAssessmentsByUser(ctx.user.id);
+      return results.map(r => ({
+        id: r.id,
+        shareToken: r.shareToken,
+        compositeScore: r.compositeScore,
+        compositeTier: r.compositeTier,
+        createdAt: r.createdAt,
+        artifactVerified: r.artifactVerified,
+      }));
+    }),
+
+  // ── Get full assessment by share token (public) ──
+  getByShareToken: publicProcedure
+    .input(z.object({ token: z.string() }))
+    .query(async ({ input }) => {
+      const assessment = await getAssessmentByShareToken(input.token);
+      if (!assessment) return null;
+
+      return {
+        compositeScore: assessment.compositeScore,
+        compositeTier: assessment.compositeTier,
+        narrative: assessment.narrative,
+        topStrengths: assessment.topStrengths as string[],
+        criticalGaps: assessment.criticalGaps as string[],
+        scores: assessment.scoresJson as Array<{ attribute: string; score: number; evidence: string; reasoning: string }>,
+        growthPlan: assessment.growthPlanJson,
+        artifactVerified: assessment.artifactVerified,
+        verificationDetails: assessment.verificationDetails,
+        createdAt: assessment.createdAt,
+      };
+    }),
+
+  // ── Verify artifact against transcript ──
+  verifyArtifact: protectedProcedure
+    .input(z.object({
+      shareToken: z.string(),
+      artifactText: z.string().min(20, "Artifact text too short"),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const assessment = await getAssessmentByShareToken(input.shareToken);
+      if (!assessment) throw new Error("Assessment not found");
+      if (assessment.userId !== ctx.user.id) throw new Error("Not authorized");
+
+      const scores = assessment.scoresJson as Array<{ attribute: string; score: number; evidence: string; reasoning: string }>;
+
+      const response = await invokeLLM({
+        messages: [
+          {
+            role: "system",
+            content: `You are an expert engineering assessor performing artifact verification. You have an interview transcript where a vibe coder described their work, the scores they received, and now a project artifact (README, design doc, or other documentation) they have provided.
+
+Your job is to cross-reference the interview claims against the artifact and determine:
+1. Which claims are SUPPORTED by the artifact
+2. Which claims CONTRADICT or are NOT SUPPORTED by the artifact
+3. Whether any scores should be ADJUSTED based on the artifact evidence
+
+RULES:
+- If the artifact confirms claims, note them as consistent
+- If the artifact contradicts claims (e.g., user said "I wrote tests" but README shows no test section), flag as discrepancy
+- If the artifact reveals ADDITIONAL maturity not mentioned in the interview (e.g., comprehensive architecture docs the user was modest about), suggest score increases
+- If the artifact is too short or generic to verify anything meaningful, mark as "insufficient"
+- Be specific about which attributes are affected
+
+${RUBRIC_CONTEXT}`,
+          },
+          {
+            role: "user",
+            content: `Cross-reference this artifact against the interview transcript and current scores.
+
+## Current Scores
+${scores.map(s => `- ${s.attribute}: ${s.score}/4 — Evidence: "${s.evidence}"`).join("\n")}
+
+## Interview Transcript
+${assessment.transcript}
+
+## Project Artifact
+${input.artifactText}`,
+          },
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "artifact_verification",
+            strict: true,
+            schema: verificationSchema,
+          },
+        },
+      });
+
+      const content = response.choices[0]?.message?.content;
+      if (!content || typeof content !== "string") {
+        throw new Error("LLM returned empty response");
+      }
+
+      const verification = JSON.parse(content);
+
+      // Save verification results to DB
+      await updateAssessmentArtifact(
+        assessment.id,
+        input.artifactText,
+        verification.status,
+        JSON.stringify(verification),
+      );
+
+      return verification;
+    }),
+
+  // ── Upload artifact file to S3 and return text ──
+  uploadArtifact: protectedProcedure
+    .input(z.object({
+      fileName: z.string(),
+      fileContent: z.string(),
+      mimeType: z.string().default("text/plain"),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const key = `artifacts/${ctx.user.id}/${nanoid(8)}-${input.fileName}`;
+      const { url } = await storagePut(key, input.fileContent, input.mimeType);
+      return { url, key };
     }),
 });

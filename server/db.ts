@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users } from "../drizzle/schema";
+import { assessments, InsertAssessment, InsertUser, users } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -89,4 +89,43 @@ export async function getUserByOpenId(openId: string) {
   return result.length > 0 ? result[0] : undefined;
 }
 
-// TODO: add feature queries here as your schema grows.
+// ── Assessment queries ──
+
+export async function saveAssessment(data: InsertAssessment) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  await db.insert(assessments).values(data);
+  return { shareToken: data.shareToken };
+}
+
+export async function getAssessmentsByUser(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(assessments).where(eq(assessments.userId, userId)).orderBy(desc(assessments.createdAt));
+}
+
+export async function getAssessmentByShareToken(token: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(assessments).where(eq(assessments.shareToken, token)).limit(1);
+  return result.length > 0 ? result[0] : undefined;
+}
+
+export async function getAssessmentById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(assessments).where(eq(assessments.id, id)).limit(1);
+  return result.length > 0 ? result[0] : undefined;
+}
+
+export async function updateAssessmentArtifact(id: number, artifactText: string, verified: "none" | "consistent" | "discrepancies" | "insufficient", details: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  await db.update(assessments).set({ artifactText, artifactVerified: verified, verificationDetails: details }).where(eq(assessments.id, id));
+}
+
+export async function updateAssessmentGrowthPlan(id: number, growthPlanJson: unknown) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  await db.update(assessments).set({ growthPlanJson }).where(eq(assessments.id, id));
+}

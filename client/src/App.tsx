@@ -9,8 +9,10 @@ import Assessment from "./pages/Assessment";
 import Results from "./pages/Results";
 import GrowthPlan from "./pages/GrowthPlan";
 import ChatAssessment from "./pages/ChatAssessment";
+import SharedResults from "./pages/SharedResults";
+import History from "./pages/History";
+
 function Router() {
-  // make sure to consider if you need authentication for certain routes
   return (
     <Switch>
       <Route path={"/"} component={Home} />
@@ -18,6 +20,8 @@ function Router() {
       <Route path={"/chat-assess"} component={ChatAssessment} />
       <Route path={"/results"} component={Results} />
       <Route path={"/growth-plan"} component={GrowthPlan} />
+      <Route path={"/share/:token"} component={SharedResults} />
+      <Route path={"/history"} component={History} />
       <Route path={"/404"} component={NotFound} />
       <Route component={NotFound} />
     </Switch>

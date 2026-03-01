@@ -1,6 +1,6 @@
 /**
  * Chat Assessment Page
- * Structured branching interview → LLM evaluation → personalized growth plan
+ * Structured branching interview → LLM evaluation → save → share → artifact verification → growth plan
  */
 
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -9,7 +9,6 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Progress } from "@/components/ui/progress";
 import {
   Send,
   Loader2,
@@ -27,12 +26,21 @@ import {
   CheckCircle2,
   AlertTriangle,
   BookOpen,
+  Copy,
+  Check,
+  Upload,
+  ShieldCheck,
+  ShieldAlert,
+  ShieldQuestion,
+  History,
 } from "lucide-react";
 import { Streamdown } from "streamdown";
 import { trpc } from "@/lib/trpc";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { getLoginUrl } from "@/const";
+import { toast } from "sonner";
 import {
   type InterviewState,
-  type InterviewQuestion,
   getInitialState,
   getCurrentQuestion,
   advanceState,
@@ -59,7 +67,7 @@ Your answers will be evaluated against the rubric to determine your maturity tie
 
 Let's start with your project.`;
 
-type AssessmentPhase = "interview" | "evaluating" | "results" | "growth-plan" | "growth-loading";
+type AssessmentPhase = "interview" | "evaluating" | "results" | "growth-plan" | "growth-loading" | "artifact-verifying";
 
 interface EvaluationResult {
   scores: Array<{
@@ -90,6 +98,23 @@ interface GrowthPlanResult {
       successCriteria: string[];
     };
     instructions: string[];
+  }>;
+}
+
+interface VerificationResult {
+  status: "consistent" | "discrepancies" | "insufficient";
+  summary: string;
+  consistentClaims: string[];
+  discrepancies: Array<{
+    claim: string;
+    artifact: string;
+    impact: string;
+  }>;
+  scoreAdjustments: Array<{
+    attribute: string;
+    originalScore: number;
+    adjustedScore: number;
+    reason: string;
   }>;
 }
 
@@ -129,6 +154,7 @@ function getScoreBarColor(score: number): string {
 
 export default function ChatAssessment() {
   const [, navigate] = useLocation();
+  const { user, isAuthenticated } = useAuth();
   const [phase, setPhase] = useState<AssessmentPhase>("interview");
   const [messages, setMessages] = useState<ChatMessage[]>([
     { id: "intro", role: "assistant", content: INTRO_MESSAGE },
@@ -139,12 +165,21 @@ export default function ChatAssessment() {
   const [evaluation, setEvaluation] = useState<EvaluationResult | null>(null);
   const [growthPlan, setGrowthPlan] = useState<GrowthPlanResult | null>(null);
   const [activePhaseTab, setActivePhaseTab] = useState(0);
+  const [shareToken, setShareToken] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [verification, setVerification] = useState<VerificationResult | null>(null);
+  const [artifactText, setArtifactText] = useState("");
+  const [showArtifactUpload, setShowArtifactUpload] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const evaluateMutation = trpc.assessment.evaluate.useMutation();
   const growthPlanMutation = trpc.assessment.generateGrowthPlan.useMutation();
+  const saveMutation = trpc.assessment.save.useMutation();
+  const updateGrowthPlanMutation = trpc.assessment.updateGrowthPlan.useMutation();
+  const verifyArtifactMutation = trpc.assessment.verifyArtifact.useMutation();
 
   // Auto-scroll to bottom
   const scrollToBottom = useCallback(() => {
@@ -176,6 +211,67 @@ export default function ChatAssessment() {
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Auto-save after evaluation completes
+  useEffect(() => {
+    if (evaluation && isAuthenticated && !shareToken && !saveMutation.isPending) {
+      const transcript = buildTranscript(interviewState);
+      saveMutation.mutate(
+        { transcript, evaluation },
+        {
+          onSuccess: (result) => {
+            setShareToken(result.shareToken);
+            toast.success("Assessment saved to your history");
+          },
+          onError: () => {
+            // Silently fail — user can still see results
+          },
+        }
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [evaluation, isAuthenticated]);
+
+  const handleCopyShareLink = () => {
+    if (!shareToken) return;
+    const url = `${window.location.origin}/share/${shareToken}`;
+    navigator.clipboard.writeText(url).then(() => {
+      setCopied(true);
+      toast.success("Share link copied to clipboard");
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string;
+      setArtifactText(text);
+    };
+    reader.readAsText(file);
+  };
+
+  const handleVerifyArtifact = () => {
+    if (!shareToken || !artifactText.trim()) return;
+    setPhase("artifact-verifying");
+    verifyArtifactMutation.mutate(
+      { shareToken, artifactText: artifactText.trim() },
+      {
+        onSuccess: (result) => {
+          setVerification(result as VerificationResult);
+          setShowArtifactUpload(false);
+          setPhase("results");
+          toast.success("Artifact verification complete");
+        },
+        onError: (err) => {
+          setPhase("results");
+          toast.error(`Verification failed: ${err.message}`);
+        },
+      }
+    );
+  };
 
   const handleSend = useCallback(() => {
     const trimmed = input.trim();
@@ -245,8 +341,6 @@ export default function ChatAssessment() {
           const nextAttribute = nextQ.attribute;
           
           if (nextQ.stage === "probing" && nextQ.questionType === "primary" && prevAttribute !== nextAttribute) {
-            const attrIndex = ATTRIBUTE_PROBES.findIndex(p => p.attribute === nextAttribute);
-            const Icon = ATTRIBUTE_ICONS[attrIndex] || Activity;
             setMessages(prev => [
               ...prev,
               {
@@ -290,11 +384,17 @@ export default function ChatAssessment() {
       { transcript, evaluation },
       {
         onSuccess: (result) => {
-          setGrowthPlan(result as GrowthPlanResult);
+          const plan = result as GrowthPlanResult;
+          setGrowthPlan(plan);
           setPhase("growth-plan");
+          // Save growth plan to DB if we have a share token
+          if (shareToken) {
+            updateGrowthPlanMutation.mutate({ shareToken, growthPlan: plan });
+          }
         },
         onError: () => {
           setPhase("results");
+          toast.error("Failed to generate growth plan. Please try again.");
         },
       }
     );
@@ -310,14 +410,44 @@ export default function ChatAssessment() {
     return (
       <div className="min-h-screen bg-background text-foreground">
         <div className="container max-w-4xl py-8">
-          {/* Header */}
-          <div className="flex items-center gap-3 mb-8">
-            <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
-              <ArrowLeft className="w-5 h-5" />
-            </Button>
-            <div>
-              <h1 className="font-display text-2xl font-bold">Assessment Results</h1>
-              <p className="text-sm text-muted-foreground">Based on your interview responses</p>
+          {/* Header with share + history */}
+          <div className="flex items-center justify-between mb-8">
+            <div className="flex items-center gap-3">
+              <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
+                <ArrowLeft className="w-5 h-5" />
+              </Button>
+              <div>
+                <h1 className="font-display text-2xl font-bold">Assessment Results</h1>
+                <p className="text-sm text-muted-foreground">Based on your interview responses</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {isAuthenticated && (
+                <Button variant="ghost" size="icon" onClick={() => navigate("/history")} title="View History">
+                  <History className="w-5 h-5" />
+                </Button>
+              )}
+              {shareToken && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleCopyShareLink}
+                  className="gap-1.5"
+                >
+                  {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                  {copied ? "Copied" : "Share"}
+                </Button>
+              )}
+              {!isAuthenticated && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { window.location.href = getLoginUrl(); }}
+                  className="gap-1.5"
+                >
+                  Sign in to save
+                </Button>
+              )}
             </div>
           </div>
 
@@ -334,6 +464,25 @@ export default function ChatAssessment() {
             <p className="font-mono text-2xl text-foreground/80">
               {evaluation.compositeScore} <span className="text-muted-foreground text-lg">/ 32</span>
             </p>
+            {verification && (
+              <div className="mt-3">
+                {verification.status === "consistent" && (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-emerald-400/30 bg-emerald-400/10 text-emerald-400 text-xs font-mono">
+                    <ShieldCheck className="w-3.5 h-3.5" /> Artifact Verified
+                  </span>
+                )}
+                {verification.status === "discrepancies" && (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-amber-400/30 bg-amber-400/10 text-amber-400 text-xs font-mono">
+                    <ShieldAlert className="w-3.5 h-3.5" /> Discrepancies Found
+                  </span>
+                )}
+                {verification.status === "insufficient" && (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-muted-foreground/30 bg-muted/10 text-muted-foreground text-xs font-mono">
+                    <ShieldQuestion className="w-3.5 h-3.5" /> Insufficient Artifact
+                  </span>
+                )}
+              </div>
+            )}
           </motion.div>
 
           {/* Narrative */}
@@ -444,12 +593,152 @@ export default function ChatAssessment() {
             </div>
           </motion.div>
 
-          {/* CTA */}
+          {/* Verification Results */}
+          {verification && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.5 }}
+              className="rounded-xl border border-border bg-card p-6 mb-8"
+            >
+              <h3 className="font-display text-lg font-semibold mb-3 flex items-center gap-2">
+                <Shield className="w-5 h-5 text-primary" />
+                Artifact Verification
+              </h3>
+              <p className="text-sm text-card-foreground/80 mb-4">{verification.summary}</p>
+
+              {verification.consistentClaims.length > 0 && (
+                <div className="mb-4">
+                  <h4 className="text-xs font-mono text-emerald-400/70 uppercase tracking-wider mb-2">Confirmed Claims</h4>
+                  <ul className="space-y-1">
+                    {verification.consistentClaims.map((c, i) => (
+                      <li key={i} className="text-sm text-card-foreground/70 flex items-start gap-2">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400/50 mt-0.5 shrink-0" />
+                        {c}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {verification.discrepancies.length > 0 && (
+                <div className="mb-4">
+                  <h4 className="text-xs font-mono text-amber-400/70 uppercase tracking-wider mb-2">Discrepancies</h4>
+                  <div className="space-y-3">
+                    {verification.discrepancies.map((d, i) => (
+                      <div key={i} className="rounded-lg border border-amber-400/20 bg-amber-400/5 p-3">
+                        <p className="text-xs text-card-foreground/80"><span className="font-semibold">Claimed:</span> {d.claim}</p>
+                        <p className="text-xs text-card-foreground/80 mt-1"><span className="font-semibold">Artifact shows:</span> {d.artifact}</p>
+                        <p className="text-xs text-amber-400/80 mt-1">{d.impact}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {verification.scoreAdjustments.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-mono text-primary/70 uppercase tracking-wider mb-2">Suggested Score Adjustments</h4>
+                  <div className="space-y-2">
+                    {verification.scoreAdjustments.map((adj, i) => (
+                      <div key={i} className="flex items-center gap-2 text-sm">
+                        <span className="font-medium text-card-foreground">{adj.attribute}:</span>
+                        <span className={getScoreColor(adj.originalScore)}>{adj.originalScore}</span>
+                        <span className="text-muted-foreground">→</span>
+                        <span className={getScoreColor(adj.adjustedScore)}>{adj.adjustedScore}</span>
+                        <span className="text-xs text-muted-foreground ml-1">({adj.reason})</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          )}
+
+          {/* Artifact Upload Section */}
+          {shareToken && !verification && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.55 }}
+              className="rounded-xl border border-dashed border-border bg-card/50 p-6 mb-8"
+            >
+              {!showArtifactUpload ? (
+                <div className="text-center">
+                  <Upload className="w-8 h-8 text-muted-foreground mx-auto mb-3" />
+                  <h3 className="font-display font-semibold mb-1">Verify with Project Artifacts</h3>
+                  <p className="text-sm text-muted-foreground mb-4 max-w-md mx-auto">
+                    Upload your README, design doc, or other project documentation to cross-reference your interview claims and increase assessment confidence.
+                  </p>
+                  <Button variant="outline" onClick={() => setShowArtifactUpload(true)}>
+                    Upload Artifact
+                  </Button>
+                </div>
+              ) : (
+                <div>
+                  <h3 className="font-display font-semibold mb-3 flex items-center gap-2">
+                    <Upload className="w-5 h-5 text-primary" />
+                    Upload Project Artifact
+                  </h3>
+                  <p className="text-sm text-muted-foreground mb-4">
+                    Paste your README, design doc, or other project documentation below, or upload a text file.
+                  </p>
+                  <div className="space-y-3">
+                    <Textarea
+                      value={artifactText}
+                      onChange={(e) => setArtifactText(e.target.value)}
+                      placeholder="Paste your README.md, design doc, or project documentation here..."
+                      className="min-h-[200px] bg-background"
+                    />
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <input
+                          ref={fileInputRef}
+                          type="file"
+                          accept=".md,.txt,.rst,.html"
+                          onChange={handleFileUpload}
+                          className="hidden"
+                        />
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => fileInputRef.current?.click()}
+                        >
+                          <FileText className="w-4 h-4 mr-1" />
+                          Upload file
+                        </Button>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button variant="ghost" size="sm" onClick={() => { setShowArtifactUpload(false); setArtifactText(""); }}>
+                          Cancel
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={handleVerifyArtifact}
+                          disabled={!artifactText.trim() || verifyArtifactMutation.isPending}
+                          className="bg-primary text-primary-foreground hover:bg-primary/90"
+                        >
+                          {verifyArtifactMutation.isPending ? (
+                            <Loader2 className="w-4 h-4 animate-spin mr-1" />
+                          ) : (
+                            <Shield className="w-4 h-4 mr-1" />
+                          )}
+                          Verify
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          )}
+
+          {/* CTAs */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.6 }}
-            className="text-center"
+            className="text-center space-y-3"
           >
             <Button
               size="lg"
@@ -459,10 +748,25 @@ export default function ChatAssessment() {
               Generate My 30-60-90 Day Growth Plan
               <ChevronRight className="w-4 h-4 ml-1" />
             </Button>
-            <p className="text-xs text-muted-foreground mt-3">
+            <p className="text-xs text-muted-foreground">
               Personalized to your project, scores, and identified gaps
             </p>
           </motion.div>
+        </div>
+      </div>
+    );
+  }
+
+  // Artifact verifying state
+  if (phase === "artifact-verifying") {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 className="w-12 h-12 animate-spin text-primary mx-auto mb-4" />
+          <h2 className="font-display text-xl font-bold mb-2">Verifying Artifact</h2>
+          <p className="text-sm text-muted-foreground max-w-md">
+            Cross-referencing your interview claims against the uploaded artifact...
+          </p>
         </div>
       </div>
     );
@@ -490,16 +794,29 @@ export default function ChatAssessment() {
       <div className="min-h-screen bg-background text-foreground">
         <div className="container max-w-4xl py-8">
           {/* Header */}
-          <div className="flex items-center gap-3 mb-8">
-            <Button variant="ghost" size="icon" onClick={() => setPhase("results")}>
-              <ArrowLeft className="w-5 h-5" />
-            </Button>
-            <div>
-              <h1 className="font-display text-2xl font-bold">Your Growth Plan</h1>
-              <p className="text-sm text-muted-foreground">
-                {growthPlan.currentTier} → {growthPlan.targetTier}
-              </p>
+          <div className="flex items-center justify-between mb-8">
+            <div className="flex items-center gap-3">
+              <Button variant="ghost" size="icon" onClick={() => setPhase("results")}>
+                <ArrowLeft className="w-5 h-5" />
+              </Button>
+              <div>
+                <h1 className="font-display text-2xl font-bold">Your Growth Plan</h1>
+                <p className="text-sm text-muted-foreground">
+                  {growthPlan.currentTier} → {growthPlan.targetTier}
+                </p>
+              </div>
             </div>
+            {shareToken && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleCopyShareLink}
+                className="gap-1.5"
+              >
+                {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                {copied ? "Copied" : "Share"}
+              </Button>
+            )}
           </div>
 
           {/* Primary Focus */}
@@ -636,7 +953,6 @@ export default function ChatAssessment() {
   if (phase === "evaluating") {
     return (
       <div className="min-h-screen bg-background text-foreground flex flex-col">
-        {/* Header */}
         <header className="border-b border-border bg-card/50 backdrop-blur-sm">
           <div className="container flex items-center gap-3 h-14">
             <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
