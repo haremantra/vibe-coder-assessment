@@ -79,3 +79,25 @@
 - [x] Composite score line chart with tier boundary reference lines
 - [x] Delta badges showing change vs. previous assessment
 - [x] Empty state handling for 0 or 1 assessment
+
+## Option B Refactoring: LLM-Driven Conversational Assessment
+
+### MUST Changes
+- [x] M1: Replace client-side state machine with server-side LLM conversation endpoint
+- [x] M2: Replace all 8 primary questions with CoVE-validated versions (embedded in system prompt)
+- [x] M3: Implement multi-branch trees with variable depth (LLM drives branching per system prompt)
+- [x] M4: Implement opening sequence with project confirmation echo-back
+- [x] M5: Enforce lower-tier discipline on boundary calls (embedded in system prompt scoring rules)
+
+### SHOULD Changes
+- [x] S1: Add neutral transition language between attributes (in system prompt)
+- [x] S2: Add anti-gaming framing to follow-up questions (in system prompt)
+- [x] S3: Implement per-attribute scoring during conversation (internal LLM tracking)
+- [x] S4: Implement structured score reveal sequence (ASSESSMENT_COMPLETE_JSON extraction)
+- [x] S5: Handle user pushback and abstract answers (in system prompt anti-gaming rules)
+
+### Gap Recommendations
+- [x] G1: Batch responses with typing indicator (no streaming)
+- [x] G2: Conversation persistence — save in-progress sessions to DB
+- [x] G3: Auth-gated chat assessment (protectedProcedure)
+- [x] G4: Retry-then-save fallback on LLM failure (2 retries, then save progress)

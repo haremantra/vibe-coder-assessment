@@ -1,6 +1,13 @@
 /**
- * Chat Assessment Page
- * Structured branching interview → LLM evaluation → save → share → artifact verification → growth plan
+ * Chat Assessment Page — LLM-Driven Conversational Assessment
+ *
+ * Architecture:
+ * - Auth-gated: requires login before starting
+ * - Session persistence: can resume in-progress assessments
+ * - Server-driven: all branching/scoring happens in the LLM via tRPC
+ * - Typing indicator during LLM calls (batch, not streaming)
+ * - Structured score reveal after completion
+ * - Artifact verification, growth plan, and share flow preserved
  */
 
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -29,53 +36,36 @@ import {
   Copy,
   Check,
   Upload,
-  ShieldCheck,
-  ShieldAlert,
-  ShieldQuestion,
   History,
+  RotateCcw,
+  LogIn,
 } from "lucide-react";
 import { Streamdown } from "streamdown";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { getLoginUrl } from "@/const";
 import { toast } from "sonner";
-import {
-  type InterviewState,
-  getInitialState,
-  getCurrentQuestion,
-  advanceState,
-  buildTranscript,
-  getProgress,
-  getStageLabel,
-  ATTRIBUTE_PROBES,
-} from "@/lib/interviewData";
+
+// ── Types ──
 
 interface ChatMessage {
   id: string;
-  role: "system" | "assistant" | "user";
+  role: "assistant" | "user";
   content: string;
-  questionId?: string;
 }
 
-const ATTRIBUTE_ICONS = [Target, Zap, BarChart3, Activity, Shield, FileText, Globe, Rocket];
-
-const INTRO_MESSAGE = `Welcome to the **Vibe Coder Assessment**.
-
-This is a conversational evaluation — not a self-labeling exercise. I'll ask you about a **real project** you've worked on recently, then probe your process across 8 competency attributes.
-
-Your answers will be evaluated against the rubric to determine your maturity tier. Be specific and honest — describe what you **actually did**, not what you wish you'd done.
-
-Let's start with your project.`;
-
-type AssessmentPhase = "interview" | "evaluating" | "results" | "growth-plan" | "growth-loading" | "artifact-verifying";
+type AssessmentPhase =
+  | "auth-gate"
+  | "resume-prompt"
+  | "interview"
+  | "evaluating"
+  | "results"
+  | "growth-plan"
+  | "growth-loading"
+  | "artifact-verifying";
 
 interface EvaluationResult {
-  scores: Array<{
-    attribute: string;
-    score: number;
-    evidence: string;
-    reasoning: string;
-  }>;
+  scores: Record<string, number> | Array<{ attribute: string; score: number; evidence: string; reasoning: string }>;
   compositeScore: number;
   compositeTier: string;
   narrative: string;
@@ -105,18 +95,24 @@ interface VerificationResult {
   status: "consistent" | "discrepancies" | "insufficient";
   summary: string;
   consistentClaims: string[];
-  discrepancies: Array<{
-    claim: string;
-    artifact: string;
-    impact: string;
-  }>;
-  scoreAdjustments: Array<{
-    attribute: string;
-    originalScore: number;
-    adjustedScore: number;
-    reason: string;
-  }>;
+  discrepancies: Array<{ claim: string; artifact: string; impact: string }>;
+  scoreAdjustments: Array<{ attribute: string; originalScore: number; adjustedScore: number; reason: string }>;
 }
+
+// ── Helpers ──
+
+const ATTRIBUTE_NAMES = [
+  "Problem Framing",
+  "Architecture Selection",
+  "Scope Discipline",
+  "Iteration Methodology",
+  "Testing & Validation",
+  "Documentation & Artifacts",
+  "Domain Grounding",
+  "Production Orientation",
+];
+
+const ATTRIBUTE_ICONS = [Target, Zap, BarChart3, Activity, Shield, FileText, Globe, Rocket];
 
 function getTierColor(tier: string): string {
   switch (tier) {
@@ -152,16 +148,32 @@ function getScoreBarColor(score: number): string {
   return "bg-emerald-400";
 }
 
+function normalizeScores(scores: EvaluationResult["scores"]): Array<{ attribute: string; score: number; evidence: string; reasoning: string }> {
+  if (Array.isArray(scores)) return scores;
+  // If scores is a Record<string, number>, convert to array
+  return Object.entries(scores).map(([attr, score]) => ({
+    attribute: attr,
+    score: typeof score === "number" ? score : 1,
+    evidence: "",
+    reasoning: "",
+  }));
+}
+
+// ── Component ──
+
 export default function ChatAssessment() {
   const [, navigate] = useLocation();
-  const { user, isAuthenticated } = useAuth();
-  const [phase, setPhase] = useState<AssessmentPhase>("interview");
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { id: "intro", role: "assistant", content: INTRO_MESSAGE },
-  ]);
-  const [interviewState, setInterviewState] = useState<InterviewState>(getInitialState);
+  const { user, isAuthenticated, loading: authLoading } = useAuth();
+
+  const [phase, setPhase] = useState<AssessmentPhase>("auth-gate");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessionId, setSessionId] = useState<number | null>(null);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [currentAttribute, setCurrentAttribute] = useState(0);
+
+  // Results state
   const [evaluation, setEvaluation] = useState<EvaluationResult | null>(null);
   const [growthPlan, setGrowthPlan] = useState<GrowthPlanResult | null>(null);
   const [activePhaseTab, setActivePhaseTab] = useState(0);
@@ -171,21 +183,33 @@ export default function ChatAssessment() {
   const [artifactText, setArtifactText] = useState("");
   const [showArtifactUpload, setShowArtifactUpload] = useState(false);
 
+  // Resume state
+  const [resumeInfo, setResumeInfo] = useState<{
+    sessionId: number;
+    messageCount: number;
+    updatedAt: Date;
+  } | null>(null);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const evaluateMutation = trpc.assessment.evaluate.useMutation();
+  // tRPC mutations
+  const startSessionMutation = trpc.assessment.startSession.useMutation();
+  const chatMutation = trpc.assessment.chat.useMutation();
+  const abandonSessionMutation = trpc.assessment.abandonSession.useMutation();
   const growthPlanMutation = trpc.assessment.generateGrowthPlan.useMutation();
-  const saveMutation = trpc.assessment.save.useMutation();
   const updateGrowthPlanMutation = trpc.assessment.updateGrowthPlan.useMutation();
   const verifyArtifactMutation = trpc.assessment.verifyArtifact.useMutation();
 
-  // Auto-scroll to bottom
+  // Check for active session
+  const activeSessionQuery = trpc.assessment.getActiveSession.useQuery(undefined, {
+    enabled: isAuthenticated,
+  });
+
+  // ── Auto-scroll ──
   const scrollToBottom = useCallback(() => {
-    const viewport = scrollRef.current?.querySelector(
-      "[data-radix-scroll-area-viewport]"
-    ) as HTMLDivElement;
+    const viewport = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]") as HTMLDivElement;
     if (viewport) {
       requestAnimationFrame(() => {
         viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
@@ -197,41 +221,172 @@ export default function ChatAssessment() {
     scrollToBottom();
   }, [messages, isTyping, scrollToBottom]);
 
-  // Ask the first question after intro
+  // ── Auth gate logic ──
   useEffect(() => {
-    const timer = setTimeout(() => {
-      const firstQ = getCurrentQuestion(interviewState);
-      if (firstQ) {
-        setMessages(prev => [
-          ...prev,
-          { id: firstQ.id + "-q", role: "assistant", content: firstQ.text, questionId: firstQ.id },
-        ]);
-      }
-    }, 1500);
-    return () => clearTimeout(timer);
+    if (authLoading) return;
+    if (!isAuthenticated) {
+      setPhase("auth-gate");
+      return;
+    }
+    // Check for active session
+    if (activeSessionQuery.data) {
+      setResumeInfo({
+        sessionId: activeSessionQuery.data.sessionId,
+        messageCount: activeSessionQuery.data.messageCount,
+        updatedAt: new Date(activeSessionQuery.data.updatedAt),
+      });
+      setPhase("resume-prompt");
+    } else if (activeSessionQuery.isSuccess && !activeSessionQuery.data) {
+      // No active session — ready to start
+      setPhase("interview");
+      handleStartSession();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, isAuthenticated, activeSessionQuery.data, activeSessionQuery.isSuccess]);
+
+  // ── Session management ──
+  const handleStartSession = useCallback(() => {
+    setIsTyping(true);
+    startSessionMutation.mutate(undefined, {
+      onSuccess: (result) => {
+        setSessionId(result.sessionId);
+        const msgs: ChatMessage[] = result.messages.map((m, i) => ({
+          id: `msg-${i}`,
+          role: m.role as "assistant" | "user",
+          content: m.content,
+        }));
+        setMessages(msgs);
+        setIsTyping(false);
+        setPhase("interview");
+        if (result.resumed) {
+          toast.info("Resuming your previous assessment session");
+        }
+      },
+      onError: (err) => {
+        setIsTyping(false);
+        toast.error(`Failed to start session: ${err.message}`);
+      },
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-save after evaluation completes
-  useEffect(() => {
-    if (evaluation && isAuthenticated && !shareToken && !saveMutation.isPending) {
-      const transcript = buildTranscript(interviewState);
-      saveMutation.mutate(
-        { transcript, evaluation },
+  const handleResumeSession = () => {
+    handleStartSession();
+  };
+
+  const handleNewSession = () => {
+    if (resumeInfo) {
+      abandonSessionMutation.mutate(
+        { sessionId: resumeInfo.sessionId },
         {
-          onSuccess: (result) => {
-            setShareToken(result.shareToken);
-            toast.success("Assessment saved to your history");
+          onSuccess: () => {
+            setResumeInfo(null);
+            handleStartSession();
           },
           onError: () => {
-            // Silently fail — user can still see results
+            // Even if abandon fails, try starting new
+            setResumeInfo(null);
+            handleStartSession();
           },
         }
       );
+    } else {
+      handleStartSession();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [evaluation, isAuthenticated]);
+  };
 
+  // ── Send message ──
+  const handleSend = useCallback(() => {
+    const trimmed = input.trim();
+    if (!trimmed || isTyping || phase !== "interview" || !sessionId) return;
+
+    const userMsg: ChatMessage = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      content: trimmed,
+    };
+    setMessages((prev) => [...prev, userMsg]);
+    setInput("");
+    setIsTyping(true);
+
+    chatMutation.mutate(
+      { sessionId, message: trimmed },
+      {
+        onSuccess: (result) => {
+          const botMsg: ChatMessage = {
+            id: `bot-${Date.now()}`,
+            role: "assistant",
+            content: result.content,
+          };
+          setMessages((prev) => [...prev, botMsg]);
+          setIsTyping(false);
+          setProgress(result.progress);
+          setCurrentAttribute(result.currentAttribute);
+
+          if (result.isComplete && result.evaluation) {
+            setEvaluation(result.evaluation as unknown as EvaluationResult);
+            setShareToken(result.shareToken ?? null);
+
+            // Delay transition to results for the user to read the closing message
+            setTimeout(() => {
+              setPhase("results");
+            }, 3000);
+          }
+        },
+        onError: (err) => {
+          setIsTyping(false);
+          if (err.message.includes("temporarily unavailable")) {
+            toast.error("Service temporarily unavailable. Your progress has been saved — refresh to resume.");
+          } else {
+            toast.error(`Error: ${err.message}`);
+          }
+        },
+      }
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [input, isTyping, phase, sessionId]);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  // ── Growth plan ──
+  const handleGenerateGrowthPlan = () => {
+    if (!evaluation) return;
+    setPhase("growth-loading");
+
+    const transcript = messages
+      .map((m) => `${m.role === "user" ? "User" : "Assessor"}: ${m.content}`)
+      .join("\n\n");
+
+    const evalForApi = {
+      ...evaluation,
+      scores: normalizeScores(evaluation.scores),
+    };
+
+    growthPlanMutation.mutate(
+      { transcript, evaluation: evalForApi },
+      {
+        onSuccess: (result) => {
+          setGrowthPlan(result as GrowthPlanResult);
+          setPhase("growth-plan");
+          // Save growth plan to assessment
+          if (shareToken) {
+            updateGrowthPlanMutation.mutate({ shareToken, growthPlan: result });
+          }
+        },
+        onError: (err) => {
+          toast.error(`Failed to generate growth plan: ${err.message}`);
+          setPhase("results");
+        },
+      }
+    );
+  };
+
+  // ── Share ──
   const handleCopyShareLink = () => {
     if (!shareToken) return;
     const url = `${window.location.origin}/share/${shareToken}`;
@@ -242,14 +397,12 @@ export default function ChatAssessment() {
     });
   };
 
+  // ── Artifact verification ──
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) => {
-      const text = ev.target?.result as string;
-      setArtifactText(text);
-    };
+    reader.onload = (ev) => setArtifactText(ev.target?.result as string);
     reader.readAsText(file);
   };
 
@@ -273,232 +426,340 @@ export default function ChatAssessment() {
     );
   };
 
-  const handleSend = useCallback(() => {
-    const trimmed = input.trim();
-    if (!trimmed || isTyping || phase !== "interview") return;
+  // ── Attribute label from progress ──
+  const stageLabel =
+    currentAttribute === 0
+      ? "Project Grounding"
+      : currentAttribute <= 8
+        ? ATTRIBUTE_NAMES[currentAttribute - 1] || "Assessment"
+        : "Complete";
 
-    const currentQ = getCurrentQuestion(interviewState);
-    if (!currentQ) return;
-
-    // Add user message
-    const userMsg: ChatMessage = {
-      id: `user-${Date.now()}`,
-      role: "user",
-      content: trimmed,
-      questionId: currentQ.id,
-    };
-    setMessages(prev => [...prev, userMsg]);
-    setInput("");
-    setIsTyping(true);
-
-    // Advance state
-    const newState = advanceState(interviewState, currentQ.id, trimmed);
-    setInterviewState(newState);
-
-    // Determine next question or completion
-    setTimeout(() => {
-      if (newState.stage.type === "complete") {
-        // Interview complete → evaluate
-        setMessages(prev => [
-          ...prev,
-          {
-            id: "complete-msg",
-            role: "assistant",
-            content: "Thank you for walking me through your project. I have everything I need.\n\nI'm now evaluating your responses against the rubric across all 8 attributes. This takes about 15-30 seconds.",
-          },
-        ]);
-        setIsTyping(false);
-        setPhase("evaluating");
-
-        // Trigger LLM evaluation
-        const transcript = buildTranscript(newState);
-        evaluateMutation.mutate(
-          { transcript },
-          {
-            onSuccess: (result) => {
-              setEvaluation(result as EvaluationResult);
-              setPhase("results");
-            },
-            onError: (error) => {
-              setMessages(prev => [
-                ...prev,
-                {
-                  id: "error-msg",
-                  role: "assistant",
-                  content: `Something went wrong during evaluation: ${error.message}. Please try again.`,
-                },
-              ]);
-              setPhase("interview");
-            },
-          }
-        );
-      } else {
-        // Ask next question
-        const nextQ = getCurrentQuestion(newState);
-        if (nextQ) {
-          // Add a transition message for new attributes
-          const prevAttribute = currentQ.attribute;
-          const nextAttribute = nextQ.attribute;
-          
-          if (nextQ.stage === "probing" && nextQ.questionType === "primary" && prevAttribute !== nextAttribute) {
-            setMessages(prev => [
-              ...prev,
-              {
-                id: `transition-${nextAttribute}`,
-                role: "assistant",
-                content: `Moving on to **${nextAttribute}**.`,
-              },
-            ]);
-            setTimeout(() => {
-              setMessages(prev => [
-                ...prev,
-                { id: nextQ.id + "-q", role: "assistant", content: nextQ.text, questionId: nextQ.id },
-              ]);
-              setIsTyping(false);
-            }, 800);
-          } else {
-            setMessages(prev => [
-              ...prev,
-              { id: nextQ.id + "-q", role: "assistant", content: nextQ.text, questionId: nextQ.id },
-            ]);
-            setIsTyping(false);
-          }
-        }
-      }
-    }, 600);
-  }, [input, isTyping, phase, interviewState, evaluateMutation]);
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  };
-
-  const handleGenerateGrowthPlan = () => {
-    if (!evaluation) return;
-    setPhase("growth-loading");
-
-    const transcript = buildTranscript(interviewState);
-    growthPlanMutation.mutate(
-      { transcript, evaluation },
-      {
-        onSuccess: (result) => {
-          const plan = result as GrowthPlanResult;
-          setGrowthPlan(plan);
-          setPhase("growth-plan");
-          // Save growth plan to DB if we have a share token
-          if (shareToken) {
-            updateGrowthPlanMutation.mutate({ shareToken, growthPlan: plan });
-          }
-        },
-        onError: () => {
-          setPhase("results");
-          toast.error("Failed to generate growth plan. Please try again.");
-        },
-      }
+  // ── Auth Gate View ──
+  if (phase === "auth-gate" || (!isAuthenticated && !authLoading)) {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex flex-col">
+        <header className="border-b border-border bg-card/50 backdrop-blur-sm">
+          <div className="container flex items-center gap-3 h-14">
+            <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
+              <ArrowLeft className="w-5 h-5" />
+            </Button>
+            <Activity className="w-5 h-5 text-primary" />
+            <span className="font-display font-semibold">Vibe Coder Assessment</span>
+          </div>
+        </header>
+        <div className="flex-1 flex items-center justify-center">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="text-center max-w-md px-6"
+          >
+            <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-6">
+              <LogIn className="w-8 h-8 text-primary" />
+            </div>
+            <h2 className="font-display text-2xl font-bold mb-3">Sign In to Begin</h2>
+            <p className="text-muted-foreground mb-6 leading-relaxed">
+              The conversational assessment requires authentication to save your progress, persist results, and generate personalized growth plans. Your session is saved automatically so you can resume anytime.
+            </p>
+            <Button
+              size="lg"
+              onClick={() => { window.location.href = getLoginUrl(); }}
+              className="bg-primary text-primary-foreground hover:bg-primary/90 glow-cyan font-display px-8 h-12"
+            >
+              <LogIn className="w-4 h-4 mr-2" />
+              Sign In to Start
+            </Button>
+            <p className="text-xs text-muted-foreground mt-4">
+              Your assessment data is private and only shared when you explicitly create a share link.
+            </p>
+          </motion.div>
+        </div>
+      </div>
     );
-  };
+  }
 
-  const progress = getProgress(interviewState);
-  const stageLabel = getStageLabel(interviewState);
+  // ── Resume Prompt View ──
+  if (phase === "resume-prompt" && resumeInfo) {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex flex-col">
+        <header className="border-b border-border bg-card/50 backdrop-blur-sm">
+          <div className="container flex items-center gap-3 h-14">
+            <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
+              <ArrowLeft className="w-5 h-5" />
+            </Button>
+            <Activity className="w-5 h-5 text-primary" />
+            <span className="font-display font-semibold">Vibe Coder Assessment</span>
+          </div>
+        </header>
+        <div className="flex-1 flex items-center justify-center">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="text-center max-w-md px-6"
+          >
+            <div className="w-16 h-16 rounded-2xl bg-amber-400/10 flex items-center justify-center mx-auto mb-6">
+              <RotateCcw className="w-8 h-8 text-amber-400" />
+            </div>
+            <h2 className="font-display text-2xl font-bold mb-3">Resume Assessment?</h2>
+            <p className="text-muted-foreground mb-2 leading-relaxed">
+              You have an in-progress assessment with {resumeInfo.messageCount} messages.
+            </p>
+            <p className="text-xs text-muted-foreground mb-6">
+              Last active: {resumeInfo.updatedAt.toLocaleString()}
+            </p>
+            <div className="flex flex-col gap-3">
+              <Button
+                size="lg"
+                onClick={handleResumeSession}
+                className="bg-primary text-primary-foreground hover:bg-primary/90 glow-cyan font-display h-12"
+              >
+                <RotateCcw className="w-4 h-4 mr-2" />
+                Resume Where I Left Off
+              </Button>
+              <Button
+                variant="outline"
+                size="lg"
+                onClick={handleNewSession}
+                className="h-12"
+              >
+                Start Fresh
+              </Button>
+            </div>
+          </motion.div>
+        </div>
+      </div>
+    );
+  }
 
-  // --- RENDER ---
-
-  // Results view
-  if (phase === "results" && evaluation) {
+  // ── Growth Plan View ──
+  if (phase === "growth-plan" && growthPlan) {
+    const currentPhaseData = growthPlan.phases[activePhaseTab];
     return (
       <div className="min-h-screen bg-background text-foreground">
-        <div className="container max-w-4xl py-8">
-          {/* Header with share + history */}
-          <div className="flex items-center justify-between mb-8">
+        <header className="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-10">
+          <div className="container flex items-center justify-between h-14">
+            <div className="flex items-center gap-3">
+              <Button variant="ghost" size="icon" onClick={() => setPhase("results")}>
+                <ArrowLeft className="w-5 h-5" />
+              </Button>
+              <div>
+                <h1 className="font-display text-lg font-bold leading-tight">Your Growth Plan</h1>
+                <p className="text-xs text-muted-foreground">
+                  {growthPlan.currentTier} → {growthPlan.targetTier}
+                </p>
+              </div>
+            </div>
+            {shareToken && (
+              <Button variant="outline" size="sm" onClick={handleCopyShareLink} className="gap-1.5">
+                {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                {copied ? "Copied" : "Share"}
+              </Button>
+            )}
+          </div>
+        </header>
+
+        <div className="container max-w-3xl py-8">
+          {/* Primary Focus */}
+          <div className="rounded-xl border border-primary/20 bg-primary/5 p-6 mb-8">
+            <p className="text-sm font-mono text-primary/70 uppercase tracking-wider mb-1">Primary Focus</p>
+            <p className="text-lg text-foreground font-medium">{growthPlan.primaryFocus}</p>
+          </div>
+
+          {/* Phase Tabs */}
+          <div className="flex gap-2 mb-8">
+            {growthPlan.phases.map((p, i) => (
+              <button
+                key={i}
+                onClick={() => setActivePhaseTab(i)}
+                className={`flex-1 rounded-lg border px-4 py-3 text-center transition-all ${
+                  activePhaseTab === i
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border bg-card text-muted-foreground hover:border-primary/30"
+                }`}
+              >
+                <span className="block text-xs font-mono uppercase tracking-wider mb-0.5">{p.phase}</span>
+                <span className="block text-sm font-medium">{p.theme}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Phase Content */}
+          {currentPhaseData && (
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={activePhaseTab}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                transition={{ duration: 0.3 }}
+                className="space-y-6"
+              >
+                {/* Objectives */}
+                <div className="rounded-xl border border-border bg-card p-6">
+                  <h3 className="font-display font-semibold mb-4 flex items-center gap-2">
+                    <Target className="w-5 h-5 text-primary" />
+                    Objectives
+                  </h3>
+                  <ul className="space-y-2">
+                    {currentPhaseData.objectives.map((obj, i) => (
+                      <li key={i} className="flex items-start gap-3 text-sm text-card-foreground">
+                        <span className="font-mono text-primary/60 shrink-0">{String(i + 1).padStart(2, "0")}</span>
+                        {obj}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                {/* Project */}
+                <div className="rounded-xl border border-primary/20 bg-card p-6">
+                  <h3 className="font-display font-semibold mb-2 flex items-center gap-2">
+                    <Rocket className="w-5 h-5 text-primary" />
+                    Project: {currentPhaseData.project.title}
+                  </h3>
+                  <p className="text-sm text-card-foreground/80 mb-4">{currentPhaseData.project.description}</p>
+                  <div className="grid md:grid-cols-2 gap-4">
+                    <div>
+                      <h4 className="text-xs font-mono text-primary/70 uppercase tracking-wider mb-2">Deliverables</h4>
+                      <ul className="space-y-1">
+                        {currentPhaseData.project.deliverables.map((d, i) => (
+                          <li key={i} className="text-sm text-card-foreground/80 flex items-start gap-2">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-primary/50 mt-0.5 shrink-0" />
+                            {d}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-mono text-primary/70 uppercase tracking-wider mb-2">Success Criteria</h4>
+                      <ul className="space-y-1">
+                        {currentPhaseData.project.successCriteria.map((c, i) => (
+                          <li key={i} className="text-sm text-card-foreground/80 flex items-start gap-2">
+                            <Shield className="w-3.5 h-3.5 text-amber-400/50 mt-0.5 shrink-0" />
+                            {c}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Instructions */}
+                <div className="rounded-xl border border-border bg-card p-6">
+                  <h3 className="font-display font-semibold mb-4 flex items-center gap-2">
+                    <BookOpen className="w-5 h-5 text-primary" />
+                    Step-by-Step Instructions
+                  </h3>
+                  <ol className="space-y-3">
+                    {currentPhaseData.instructions.map((inst, i) => (
+                      <li key={i} className="flex items-start gap-3">
+                        <span className="w-6 h-6 rounded-full bg-primary/10 text-primary text-xs font-mono flex items-center justify-center shrink-0 mt-0.5">
+                          {i + 1}
+                        </span>
+                        <span className="text-sm text-card-foreground/80">{inst}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              </motion.div>
+            </AnimatePresence>
+          )}
+
+          {/* Phase Navigation */}
+          <div className="flex justify-between mt-8">
+            <Button
+              variant="outline"
+              onClick={() => setActivePhaseTab(Math.max(0, activePhaseTab - 1))}
+              disabled={activePhaseTab === 0}
+            >
+              <ArrowLeft className="w-4 h-4 mr-1" />
+              Previous Phase
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => setActivePhaseTab(Math.min(growthPlan.phases.length - 1, activePhaseTab + 1))}
+              disabled={activePhaseTab === growthPlan.phases.length - 1}
+            >
+              Next Phase
+              <ChevronRight className="w-4 h-4 ml-1" />
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Growth Loading View ──
+  if (phase === "growth-loading") {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex flex-col">
+        <header className="border-b border-border bg-card/50 backdrop-blur-sm">
+          <div className="container flex items-center gap-3 h-14">
+            <Button variant="ghost" size="icon" onClick={() => setPhase("results")}>
+              <ArrowLeft className="w-5 h-5" />
+            </Button>
+            <Activity className="w-5 h-5 text-primary" />
+            <span className="font-display font-semibold">Generating Growth Plan</span>
+          </div>
+        </header>
+        <div className="flex-1 flex items-center justify-center">
+          <div className="text-center">
+            <Loader2 className="w-12 h-12 animate-spin text-primary mx-auto mb-4" />
+            <h2 className="font-display text-xl font-bold mb-2">Building Your Growth Plan</h2>
+            <p className="text-sm text-muted-foreground max-w-md">
+              Creating a personalized 30-60-90 day roadmap with projects tailored to your specific gaps...
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Results View ──
+  if ((phase === "results" || phase === "artifact-verifying") && evaluation) {
+    const scores = normalizeScores(evaluation.scores);
+    return (
+      <div className="min-h-screen bg-background text-foreground">
+        <header className="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-10">
+          <div className="container flex items-center justify-between h-14">
             <div className="flex items-center gap-3">
               <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
                 <ArrowLeft className="w-5 h-5" />
               </Button>
-              <div>
-                <h1 className="font-display text-2xl font-bold">Assessment Results</h1>
-                <p className="text-sm text-muted-foreground">Based on your interview responses</p>
-              </div>
+              <Activity className="w-5 h-5 text-primary" />
+              <span className="font-display font-semibold">Assessment Results</span>
             </div>
             <div className="flex items-center gap-2">
-              {isAuthenticated && (
-                <Button variant="ghost" size="icon" onClick={() => navigate("/history")} title="View History">
-                  <History className="w-5 h-5" />
-                </Button>
-              )}
               {shareToken && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleCopyShareLink}
-                  className="gap-1.5"
-                >
+                <Button variant="outline" size="sm" onClick={handleCopyShareLink} className="gap-1.5">
                   {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
                   {copied ? "Copied" : "Share"}
                 </Button>
               )}
-              {!isAuthenticated && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => { window.location.href = getLoginUrl(); }}
-                  className="gap-1.5"
-                >
-                  Sign in to save
-                </Button>
-              )}
+              <Button variant="outline" size="sm" onClick={() => navigate("/history")} className="gap-1.5">
+                <History className="w-4 h-4" />
+                History
+              </Button>
             </div>
           </div>
+        </header>
 
+        <div className="container max-w-3xl py-8">
           {/* Tier Badge */}
           <motion.div
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
-            className={`rounded-xl border p-8 mb-8 text-center ${getTierBg(evaluation.compositeTier)}`}
+            transition={{ duration: 0.5 }}
+            className={`rounded-xl border p-8 text-center mb-8 ${getTierBg(evaluation.compositeTier)}`}
           >
-            <p className="text-sm font-mono text-muted-foreground mb-2 uppercase tracking-wider">Composite Maturity Tier</p>
+            <p className="text-sm font-mono uppercase tracking-wider text-muted-foreground mb-2">Your Maturity Tier</p>
             <h2 className={`font-display text-5xl font-bold mb-2 ${getTierColor(evaluation.compositeTier)}`}>
               {evaluation.compositeTier}
             </h2>
-            <p className="font-mono text-2xl text-foreground/80">
-              {evaluation.compositeScore} <span className="text-muted-foreground text-lg">/ 32</span>
+            <p className="font-mono text-2xl text-foreground/80 mb-4">
+              {evaluation.compositeScore}<span className="text-muted-foreground">/32</span>
             </p>
-            {verification && (
-              <div className="mt-3">
-                {verification.status === "consistent" && (
-                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-emerald-400/30 bg-emerald-400/10 text-emerald-400 text-xs font-mono">
-                    <ShieldCheck className="w-3.5 h-3.5" /> Artifact Verified
-                  </span>
-                )}
-                {verification.status === "discrepancies" && (
-                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-amber-400/30 bg-amber-400/10 text-amber-400 text-xs font-mono">
-                    <ShieldAlert className="w-3.5 h-3.5" /> Discrepancies Found
-                  </span>
-                )}
-                {verification.status === "insufficient" && (
-                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-muted-foreground/30 bg-muted/10 text-muted-foreground text-xs font-mono">
-                    <ShieldQuestion className="w-3.5 h-3.5" /> Insufficient Artifact
-                  </span>
-                )}
-              </div>
-            )}
-          </motion.div>
-
-          {/* Narrative */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.2 }}
-            className="rounded-xl border border-border bg-card p-6 mb-8"
-          >
-            <h3 className="font-display text-lg font-semibold mb-3 flex items-center gap-2">
-              <Sparkles className="w-5 h-5 text-primary" />
-              Assessment Narrative
-            </h3>
-            <div className="prose prose-sm dark:prose-invert max-w-none text-card-foreground">
-              <Streamdown>{evaluation.narrative}</Streamdown>
-            </div>
+            <p className="text-sm text-muted-foreground max-w-lg mx-auto leading-relaxed">
+              {evaluation.narrative}
+            </p>
           </motion.div>
 
           {/* Strengths & Gaps */}
@@ -553,7 +814,7 @@ export default function ChatAssessment() {
           >
             <h3 className="font-display text-lg font-semibold mb-6">Attribute Breakdown</h3>
             <div className="space-y-5">
-              {evaluation.scores.map((score, i) => {
+              {scores.map((score, i) => {
                 const Icon = ATTRIBUTE_ICONS[i] || Activity;
                 return (
                   <div key={score.attribute}>
@@ -574,19 +835,25 @@ export default function ChatAssessment() {
                         className={`h-full rounded-full ${getScoreBarColor(score.score)}`}
                       />
                     </div>
-                    <details className="group">
-                      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground transition-colors">
-                        View evidence & reasoning
-                      </summary>
-                      <div className="mt-2 pl-6 border-l border-border space-y-1">
-                        <p className="text-xs text-foreground/70">
-                          <span className="font-semibold text-foreground/90">Evidence:</span> {score.evidence}
-                        </p>
-                        <p className="text-xs text-foreground/70">
-                          <span className="font-semibold text-foreground/90">Reasoning:</span> {score.reasoning}
-                        </p>
-                      </div>
-                    </details>
+                    {(score.evidence || score.reasoning) && (
+                      <details className="group">
+                        <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground transition-colors">
+                          View evidence & reasoning
+                        </summary>
+                        <div className="mt-2 pl-6 border-l border-border space-y-1">
+                          {score.evidence && (
+                            <p className="text-xs text-foreground/70">
+                              <span className="font-semibold text-foreground/90">Evidence:</span> {score.evidence}
+                            </p>
+                          )}
+                          {score.reasoning && (
+                            <p className="text-xs text-foreground/70">
+                              <span className="font-semibold text-foreground/90">Reasoning:</span> {score.reasoning}
+                            </p>
+                          )}
+                        </div>
+                      </details>
+                    )}
                   </div>
                 );
               })}
@@ -606,7 +873,6 @@ export default function ChatAssessment() {
                 Artifact Verification
               </h3>
               <p className="text-sm text-card-foreground/80 mb-4">{verification.summary}</p>
-
               {verification.consistentClaims.length > 0 && (
                 <div className="mb-4">
                   <h4 className="text-xs font-mono text-emerald-400/70 uppercase tracking-wider mb-2">Confirmed Claims</h4>
@@ -620,7 +886,6 @@ export default function ChatAssessment() {
                   </ul>
                 </div>
               )}
-
               {verification.discrepancies.length > 0 && (
                 <div className="mb-4">
                   <h4 className="text-xs font-mono text-amber-400/70 uppercase tracking-wider mb-2">Discrepancies</h4>
@@ -635,10 +900,9 @@ export default function ChatAssessment() {
                   </div>
                 </div>
               )}
-
               {verification.scoreAdjustments.length > 0 && (
                 <div>
-                  <h4 className="text-xs font-mono text-primary/70 uppercase tracking-wider mb-2">Suggested Score Adjustments</h4>
+                  <h4 className="text-xs font-mono text-primary/70 uppercase tracking-wider mb-2">Score Adjustments</h4>
                   <div className="space-y-2">
                     {verification.scoreAdjustments.map((adj, i) => (
                       <div key={i} className="flex items-center gap-2 text-sm">
@@ -655,7 +919,7 @@ export default function ChatAssessment() {
             </motion.div>
           )}
 
-          {/* Artifact Upload Section */}
+          {/* Artifact Upload */}
           {shareToken && !verification && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
@@ -668,7 +932,7 @@ export default function ChatAssessment() {
                   <Upload className="w-8 h-8 text-muted-foreground mx-auto mb-3" />
                   <h3 className="font-display font-semibold mb-1">Verify with Project Artifacts</h3>
                   <p className="text-sm text-muted-foreground mb-4 max-w-md mx-auto">
-                    Upload your README, design doc, or other project documentation to cross-reference your interview claims and increase assessment confidence.
+                    Upload your README, design doc, or other project documentation to cross-reference your interview claims.
                   </p>
                   <Button variant="outline" onClick={() => setShowArtifactUpload(true)}>
                     Upload Artifact
@@ -680,9 +944,6 @@ export default function ChatAssessment() {
                     <Upload className="w-5 h-5 text-primary" />
                     Upload Project Artifact
                   </h3>
-                  <p className="text-sm text-muted-foreground mb-4">
-                    Paste your README, design doc, or other project documentation below, or upload a text file.
-                  </p>
                   <div className="space-y-3">
                     <Textarea
                       value={artifactText}
@@ -692,18 +953,8 @@ export default function ChatAssessment() {
                     />
                     <div className="flex items-center justify-between">
                       <div>
-                        <input
-                          ref={fileInputRef}
-                          type="file"
-                          accept=".md,.txt,.rst,.html"
-                          onChange={handleFileUpload}
-                          className="hidden"
-                        />
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => fileInputRef.current?.click()}
-                        >
+                        <input ref={fileInputRef} type="file" accept=".md,.txt,.rst,.html" onChange={handleFileUpload} className="hidden" />
+                        <Button variant="ghost" size="sm" onClick={() => fileInputRef.current?.click()}>
                           <FileText className="w-4 h-4 mr-1" />
                           Upload file
                         </Button>
@@ -718,11 +969,7 @@ export default function ChatAssessment() {
                           disabled={!artifactText.trim() || verifyArtifactMutation.isPending}
                           className="bg-primary text-primary-foreground hover:bg-primary/90"
                         >
-                          {verifyArtifactMutation.isPending ? (
-                            <Loader2 className="w-4 h-4 animate-spin mr-1" />
-                          ) : (
-                            <Shield className="w-4 h-4 mr-1" />
-                          )}
+                          {verifyArtifactMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Shield className="w-4 h-4 mr-1" />}
                           Verify
                         </Button>
                       </div>
@@ -749,7 +996,7 @@ export default function ChatAssessment() {
               <ChevronRight className="w-4 h-4 ml-1" />
             </Button>
             <p className="text-xs text-muted-foreground">
-              Personalized to your project, scores, and identified gaps
+              Personalized to your {evaluation.compositeTier} tier with projects targeting your specific gaps.
             </p>
           </motion.div>
         </div>
@@ -757,199 +1004,7 @@ export default function ChatAssessment() {
     );
   }
 
-  // Artifact verifying state
-  if (phase === "artifact-verifying") {
-    return (
-      <div className="min-h-screen bg-background text-foreground flex items-center justify-center">
-        <div className="text-center">
-          <Loader2 className="w-12 h-12 animate-spin text-primary mx-auto mb-4" />
-          <h2 className="font-display text-xl font-bold mb-2">Verifying Artifact</h2>
-          <p className="text-sm text-muted-foreground max-w-md">
-            Cross-referencing your interview claims against the uploaded artifact...
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  // Growth plan loading
-  if (phase === "growth-loading") {
-    return (
-      <div className="min-h-screen bg-background text-foreground flex items-center justify-center">
-        <div className="text-center">
-          <Loader2 className="w-12 h-12 animate-spin text-primary mx-auto mb-4" />
-          <h2 className="font-display text-xl font-bold mb-2">Generating Your Growth Plan</h2>
-          <p className="text-sm text-muted-foreground max-w-md">
-            Building a personalized 30-60-90 day plan with projects tailored to your assessment results and specific gaps...
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  // Growth plan view
-  if (phase === "growth-plan" && growthPlan) {
-    const currentPhase = growthPlan.phases[activePhaseTab];
-    return (
-      <div className="min-h-screen bg-background text-foreground">
-        <div className="container max-w-4xl py-8">
-          {/* Header */}
-          <div className="flex items-center justify-between mb-8">
-            <div className="flex items-center gap-3">
-              <Button variant="ghost" size="icon" onClick={() => setPhase("results")}>
-                <ArrowLeft className="w-5 h-5" />
-              </Button>
-              <div>
-                <h1 className="font-display text-2xl font-bold">Your Growth Plan</h1>
-                <p className="text-sm text-muted-foreground">
-                  {growthPlan.currentTier} → {growthPlan.targetTier}
-                </p>
-              </div>
-            </div>
-            {shareToken && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleCopyShareLink}
-                className="gap-1.5"
-              >
-                {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                {copied ? "Copied" : "Share"}
-              </Button>
-            )}
-          </div>
-
-          {/* Primary Focus */}
-          <div className="rounded-xl border border-primary/20 bg-primary/5 p-6 mb-8">
-            <p className="text-sm font-mono text-primary/70 uppercase tracking-wider mb-1">Primary Focus</p>
-            <p className="text-lg text-foreground font-medium">{growthPlan.primaryFocus}</p>
-          </div>
-
-          {/* Phase Tabs */}
-          <div className="flex gap-2 mb-8">
-            {growthPlan.phases.map((p, i) => (
-              <button
-                key={i}
-                onClick={() => setActivePhaseTab(i)}
-                className={`flex-1 rounded-lg border px-4 py-3 text-center transition-all ${
-                  activePhaseTab === i
-                    ? "border-primary bg-primary/10 text-primary"
-                    : "border-border bg-card text-muted-foreground hover:border-primary/30"
-                }`}
-              >
-                <span className="block text-xs font-mono uppercase tracking-wider mb-0.5">{p.phase}</span>
-                <span className="block text-sm font-medium">{p.theme}</span>
-              </button>
-            ))}
-          </div>
-
-          {/* Phase Content */}
-          {currentPhase && (
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={activePhaseTab}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                transition={{ duration: 0.3 }}
-                className="space-y-6"
-              >
-                {/* Objectives */}
-                <div className="rounded-xl border border-border bg-card p-6">
-                  <h3 className="font-display font-semibold mb-4 flex items-center gap-2">
-                    <Target className="w-5 h-5 text-primary" />
-                    Objectives
-                  </h3>
-                  <ul className="space-y-2">
-                    {currentPhase.objectives.map((obj, i) => (
-                      <li key={i} className="flex items-start gap-3 text-sm text-card-foreground">
-                        <span className="font-mono text-primary/60 shrink-0">{String(i + 1).padStart(2, "0")}</span>
-                        {obj}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                {/* Project */}
-                <div className="rounded-xl border border-primary/20 bg-card p-6">
-                  <h3 className="font-display font-semibold mb-2 flex items-center gap-2">
-                    <Rocket className="w-5 h-5 text-primary" />
-                    Project: {currentPhase.project.title}
-                  </h3>
-                  <p className="text-sm text-card-foreground/80 mb-4">{currentPhase.project.description}</p>
-
-                  <div className="grid md:grid-cols-2 gap-4">
-                    <div>
-                      <h4 className="text-xs font-mono text-primary/70 uppercase tracking-wider mb-2">Deliverables</h4>
-                      <ul className="space-y-1">
-                        {currentPhase.project.deliverables.map((d, i) => (
-                          <li key={i} className="text-sm text-card-foreground/80 flex items-start gap-2">
-                            <CheckCircle2 className="w-3.5 h-3.5 text-primary/50 mt-0.5 shrink-0" />
-                            {d}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-mono text-primary/70 uppercase tracking-wider mb-2">Success Criteria</h4>
-                      <ul className="space-y-1">
-                        {currentPhase.project.successCriteria.map((c, i) => (
-                          <li key={i} className="text-sm text-card-foreground/80 flex items-start gap-2">
-                            <Shield className="w-3.5 h-3.5 text-amber-400/50 mt-0.5 shrink-0" />
-                            {c}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Step-by-step Instructions */}
-                <div className="rounded-xl border border-border bg-card p-6">
-                  <h3 className="font-display font-semibold mb-4 flex items-center gap-2">
-                    <BookOpen className="w-5 h-5 text-primary" />
-                    Step-by-Step Instructions
-                  </h3>
-                  <ol className="space-y-3">
-                    {currentPhase.instructions.map((inst, i) => (
-                      <li key={i} className="flex items-start gap-3">
-                        <span className="w-6 h-6 rounded-full bg-primary/10 text-primary text-xs font-mono flex items-center justify-center shrink-0 mt-0.5">
-                          {i + 1}
-                        </span>
-                        <span className="text-sm text-card-foreground/80">{inst}</span>
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-              </motion.div>
-            </AnimatePresence>
-          )}
-
-          {/* Navigation */}
-          <div className="flex justify-between mt-8">
-            <Button
-              variant="outline"
-              onClick={() => setActivePhaseTab(Math.max(0, activePhaseTab - 1))}
-              disabled={activePhaseTab === 0}
-            >
-              <ArrowLeft className="w-4 h-4 mr-1" />
-              Previous Phase
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => setActivePhaseTab(Math.min(growthPlan.phases.length - 1, activePhaseTab + 1))}
-              disabled={activePhaseTab === growthPlan.phases.length - 1}
-            >
-              Next Phase
-              <ChevronRight className="w-4 h-4 ml-1" />
-            </Button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Evaluating state
+  // ── Evaluating View ──
   if (phase === "evaluating") {
     return (
       <div className="min-h-screen bg-background text-foreground flex flex-col">
@@ -962,13 +1017,12 @@ export default function ChatAssessment() {
             <span className="font-display font-semibold">Vibe Coder Assessment</span>
           </div>
         </header>
-
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
             <Loader2 className="w-12 h-12 animate-spin text-primary mx-auto mb-4" />
             <h2 className="font-display text-xl font-bold mb-2">Evaluating Your Responses</h2>
             <p className="text-sm text-muted-foreground max-w-md">
-              Scoring your interview against the rubric across all 8 attributes. This takes about 15-30 seconds...
+              Scoring your interview against the rubric across all 8 attributes...
             </p>
           </div>
         </div>
@@ -976,7 +1030,7 @@ export default function ChatAssessment() {
     );
   }
 
-  // Interview (chat) view
+  // ── Interview (Chat) View ──
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col">
       {/* Header */}
@@ -988,13 +1042,9 @@ export default function ChatAssessment() {
           <Activity className="w-5 h-5 text-primary" />
           <div className="flex-1">
             <span className="font-display font-semibold text-sm">Vibe Coder Assessment</span>
-            <span className="text-xs text-muted-foreground ml-2 font-mono">
-              {stageLabel}
-            </span>
+            <span className="text-xs text-muted-foreground ml-2 font-mono">{stageLabel}</span>
           </div>
-          <span className="text-xs font-mono text-muted-foreground">
-            {Math.round(progress * 100)}%
-          </span>
+          <span className="text-xs font-mono text-muted-foreground">{Math.round(progress * 100)}%</span>
         </div>
         <div className="h-0.5 bg-muted">
           <motion.div
@@ -1010,7 +1060,7 @@ export default function ChatAssessment() {
       <div className="flex-1 overflow-hidden" ref={scrollRef}>
         <ScrollArea className="h-[calc(100vh-8rem)]">
           <div className="container max-w-3xl py-6 space-y-4">
-            {messages.filter(m => m.role !== "system").map((msg) => (
+            {messages.map((msg) => (
               <motion.div
                 key={msg.id}
                 initial={{ opacity: 0, y: 10 }}
@@ -1041,12 +1091,9 @@ export default function ChatAssessment() {
               </motion.div>
             ))}
 
+            {/* Typing Indicator */}
             {isTyping && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="flex gap-3"
-              >
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-3">
                 <div className="w-8 h-8 shrink-0 mt-1 rounded-full bg-primary/10 flex items-center justify-center">
                   <Sparkles className="w-4 h-4 text-primary" />
                 </div>
@@ -1066,10 +1113,7 @@ export default function ChatAssessment() {
       {/* Input Area */}
       <div className="border-t border-border bg-card/50 backdrop-blur-sm">
         <div className="container max-w-3xl py-3">
-          <form
-            onSubmit={(e) => { e.preventDefault(); handleSend(); }}
-            className="flex gap-2 items-end"
-          >
+          <form onSubmit={(e) => { e.preventDefault(); handleSend(); }} className="flex gap-2 items-end">
             <Textarea
               ref={textareaRef}
               value={input}
@@ -1086,11 +1130,7 @@ export default function ChatAssessment() {
               disabled={!input.trim() || isTyping || phase !== "interview"}
               className="shrink-0 h-[42px] w-[42px]"
             >
-              {isTyping ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <Send className="w-4 h-4" />
-              )}
+              {isTyping ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
             </Button>
           </form>
           <p className="text-[10px] text-muted-foreground mt-1.5 text-center">

@@ -92,3 +92,29 @@ export const milestoneProgress = mysqlTable("milestone_progress", {
 
 export type MilestoneProgress = typeof milestoneProgress.$inferSelect;
 export type InsertMilestoneProgress = typeof milestoneProgress.$inferInsert;
+
+/**
+ * Conversation sessions for LLM-driven chat assessment.
+ * Stores in-progress and completed conversations so users can resume.
+ */
+export const conversationSessions = mysqlTable("conversation_sessions", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  /** Full conversation history as JSON array of {role, content} messages */
+  messages: json("messages").notNull(),
+  /** Current attribute being assessed (1-8), 0 = opening, 9 = closing */
+  currentAttribute: int("currentAttribute").default(0).notNull(),
+  /** Internal per-attribute scores as they are assigned during conversation */
+  internalScores: json("internalScores"),
+  /** The project description echoed back for anchoring */
+  projectSummary: text("projectSummary"),
+  /** Session status */
+  status: mysqlEnum("status", ["in_progress", "completed", "abandoned"]).default("in_progress").notNull(),
+  /** Reference to the assessment created when session completes */
+  assessmentId: int("assessmentId"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type ConversationSession = typeof conversationSessions.$inferSelect;
+export type InsertConversationSession = typeof conversationSessions.$inferInsert;

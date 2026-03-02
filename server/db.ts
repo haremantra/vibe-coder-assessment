@@ -2,7 +2,9 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   assessments,
+  conversationSessions,
   InsertAssessment,
+  InsertConversationSession,
   InsertMilestoneProgress,
   InsertNotification,
   InsertUser,
@@ -244,4 +246,46 @@ export async function getPhaseCompletionStatus(assessmentId: number, userId: num
     total: result[0]?.total ?? 0,
     completed: result[0]?.completed ?? 0,
   };
+}
+
+// ── Conversation session queries ──
+
+export async function saveConversationSession(data: Omit<InsertConversationSession, "id" | "createdAt" | "updatedAt">): Promise<number> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const result = await db.insert(conversationSessions).values(data);
+  return Number(result[0].insertId);
+}
+
+export async function getConversationSession(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(conversationSessions).where(eq(conversationSessions.id, id)).limit(1);
+  return result.length > 0 ? result[0] : undefined;
+}
+
+export async function getActiveSessionForUser(userId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db
+    .select()
+    .from(conversationSessions)
+    .where(
+      and(
+        eq(conversationSessions.userId, userId),
+        eq(conversationSessions.status, "in_progress"),
+      ),
+    )
+    .orderBy(desc(conversationSessions.updatedAt))
+    .limit(1);
+  return result.length > 0 ? result[0] : undefined;
+}
+
+export async function updateConversationSession(
+  id: number,
+  data: Partial<Pick<InsertConversationSession, "messages" | "currentAttribute" | "internalScores" | "projectSummary" | "status" | "assessmentId">>,
+) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  await db.update(conversationSessions).set(data).where(eq(conversationSessions.id, id));
 }
