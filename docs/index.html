@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Delegation Trap — The AI Trap Series</title>
+  <meta name="description" content="Counter-Intuitive Advice #5: Your retry loops are treating irreversible failures as a feature. Learn to build AI systems for accountability, not just capability." />
+  <meta property="og:title" content="The Delegation Trap — AI Trap Series" />
+  <meta property="og:description" content="Your retry loops are treating irreversible failures as a feature. Are you building for accountability?" />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="slide_1.jpg" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    /* ── Reset & Base ─────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: #0a0e1a;
+      color: #c8d6e5;
+      line-height: 1.7;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Utility ──────────────────────────────────────────── */
+    .container { max-width: 900px; margin: 0 auto; padding: 0 24px; }
+    .gold-rule { height: 3px; background: linear-gradient(90deg, #c9952c, #e8c460, #c9952c); border: none; margin: 32px 0; border-radius: 2px; }
+    .teal { color: #3dd6c8; }
+    .gold { color: #e8c460; }
+    .white { color: #f0f4f8; }
+
+    /* ── Hero ─────────────────────────────────────────────── */
+    .hero {
+      position: relative;
+      padding: 80px 0 60px;
+      text-align: center;
+      overflow: hidden;
+    }
+    .hero::before {
+      content: '';
+      position: absolute; inset: 0;
+      background:
+        radial-gradient(ellipse 80% 60% at 50% 0%, rgba(61,214,200,.08) 0%, transparent 70%),
+        linear-gradient(180deg, #0d1224 0%, #0a0e1a 100%);
+      z-index: 0;
+    }
+    .hero > * { position: relative; z-index: 1; }
+    .series-badge {
+      display: inline-block;
+      padding: 6px 20px;
+      border: 1.5px solid #3dd6c8;
+      color: #3dd6c8;
+      font-size: .75rem;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      border-radius: 4px;
+      margin-bottom: 28px;
+    }
+    .hero h1 {
+      font-size: clamp(2.2rem, 5vw, 3.6rem);
+      font-weight: 900;
+      color: #f0f4f8;
+      line-height: 1.15;
+      margin-bottom: 20px;
+    }
+    .hero h1 span { color: #e8c460; }
+    .hero .subtitle {
+      font-size: clamp(1rem, 2vw, 1.25rem);
+      color: #8899aa;
+      max-width: 640px;
+      margin: 0 auto 12px;
+    }
+    .hero .advice-tag {
+      font-size: .8rem;
+      color: #5a6a7a;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-top: 20px;
+    }
+
+    /* ── Section headings ─────────────────────────────────── */
+    .section { padding: 64px 0; }
+    .section-heading {
+      font-size: clamp(1.5rem, 3.5vw, 2.2rem);
+      font-weight: 800;
+      color: #f0f4f8;
+      margin-bottom: 8px;
+      line-height: 1.2;
+    }
+    .section-sub {
+      font-size: 1.05rem;
+      color: #3dd6c8;
+      font-style: italic;
+      margin-bottom: 32px;
+    }
+
+    /* ── Comparison Panel ─────────────────────────────────── */
+    .compare-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin: 32px 0;
+    }
+    @media (max-width: 640px) { .compare-grid { grid-template-columns: 1fr; } }
+    .compare-card {
+      background: rgba(255,255,255,.03);
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: 12px;
+      padding: 32px 28px;
+    }
+    .compare-card h3 {
+      font-size: .85rem;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 20px;
+    }
+    .compare-card.user h3 { color: #8899aa; }
+    .compare-card.architect h3 { color: #e8c460; }
+    .compare-card ul { list-style: none; padding: 0; }
+    .compare-card ul li {
+      padding: 6px 0;
+      font-size: .95rem;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .compare-card ul li .arrow { color: #5a6a7a; font-family: 'JetBrains Mono', monospace; }
+    .compare-card .tag {
+      margin-top: 16px;
+      font-size: .85rem;
+      font-style: italic;
+    }
+    .compare-card.user .tag { color: #6a7a8a; }
+    .compare-card.architect .tag { color: #3dd6c8; }
+
+    /* ── Blockquote ───────────────────────────────────────── */
+    blockquote {
+      border-left: 3px solid #e8c460;
+      padding: 16px 24px;
+      margin: 32px 0;
+      background: rgba(232,196,96,.04);
+      border-radius: 0 8px 8px 0;
+      font-size: .95rem;
+      color: #a0b0c0;
+    }
+    blockquote cite {
+      display: block;
+      margin-top: 8px;
+      font-size: .82rem;
+      color: #6a7a8a;
+      font-style: normal;
+    }
+
+    /* ── Matrix Table ─────────────────────────────────────── */
+    .matrix-wrapper { overflow-x: auto; margin: 32px 0; }
+    .matrix {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 8px;
+    }
+    .matrix th, .matrix td {
+      padding: 20px 16px;
+      text-align: center;
+      border-radius: 8px;
+      font-size: .92rem;
+    }
+    .matrix th {
+      background: transparent;
+      color: #6a7a8a;
+      font-weight: 700;
+      font-size: .75rem;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .matrix th.row-label {
+      writing-mode: vertical-lr;
+      text-orientation: mixed;
+      transform: rotate(180deg);
+      padding: 16px 8px;
+      min-width: 40px;
+    }
+    .matrix td {
+      background: rgba(255,255,255,.03);
+      border: 1px solid rgba(255,255,255,.06);
+      color: #c8d6e5;
+      font-weight: 600;
+    }
+    .matrix td.danger {
+      border-color: #e74c3c;
+      background: rgba(231,76,60,.08);
+      color: #ff6b6b;
+      font-weight: 800;
+    }
+
+    /* ── Flow Steps ───────────────────────────────────────── */
+    .flow-steps {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin: 32px 0;
+    }
+    @media (max-width: 700px) { .flow-steps { grid-template-columns: 1fr 1fr; } }
+    .flow-step {
+      background: rgba(255,255,255,.03);
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: 12px;
+      padding: 24px 16px;
+      text-align: center;
+      position: relative;
+    }
+    .flow-step .step-num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      font-size: .85rem;
+      font-weight: 800;
+      margin-bottom: 12px;
+    }
+    .flow-step:nth-child(1) .step-num { background: rgba(61,214,200,.15); color: #3dd6c8; }
+    .flow-step:nth-child(2) .step-num { background: rgba(232,196,96,.15); color: #e8c460; }
+    .flow-step:nth-child(3) .step-num { background: rgba(255,165,0,.15); color: #ffa500; }
+    .flow-step:nth-child(4) .step-num { background: rgba(231,76,60,.15); color: #e74c3c; }
+    .flow-step p { font-size: .88rem; color: #8899aa; line-height: 1.5; }
+    .flow-step:not(:last-child)::after {
+      content: '\2192';
+      position: absolute;
+      right: -14px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: #3a4a5a;
+      font-size: 1.2rem;
+    }
+    @media (max-width: 700px) {
+      .flow-step:nth-child(2)::after { display: none; }
+      .flow-step:not(:last-child)::after { right: -12px; }
+    }
+
+    /* ── Code Block ───────────────────────────────────────── */
+    .code-block {
+      background: #0d1224;
+      border: 1px solid rgba(61,214,200,.15);
+      border-radius: 12px;
+      padding: 28px 24px;
+      overflow-x: auto;
+      margin: 32px 0;
+      position: relative;
+    }
+    .code-block::before {
+      content: 'Python';
+      position: absolute;
+      top: 10px; right: 16px;
+      font-size: .7rem;
+      color: #3a4a5a;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+    .code-block pre {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .85rem;
+      line-height: 1.8;
+      color: #c8d6e5;
+    }
+    .code-block .kw { color: #c792ea; }
+    .code-block .fn { color: #82aaff; }
+    .code-block .str { color: #c3e88d; }
+    .code-block .cm { color: #546e7a; }
+    .code-block .var { color: #f0f4f8; }
+    .code-block .ret { color: #e8c460; }
+    .code-block .op { color: #89ddff; }
+
+    .code-annotation {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      margin: 12px 0;
+      padding: 12px 16px;
+      background: rgba(232,196,96,.04);
+      border-radius: 8px;
+      border-left: 3px solid;
+    }
+    .code-annotation.circuit { border-color: #e8c460; }
+    .code-annotation.only { border-color: #3dd6c8; }
+    .code-annotation .label {
+      font-size: .82rem;
+      font-weight: 600;
+    }
+    .code-annotation.circuit .label { color: #e8c460; }
+    .code-annotation.only .label { color: #3dd6c8; }
+
+    /* ── CTA Section ──────────────────────────────────────── */
+    .cta-section {
+      text-align: center;
+      padding: 80px 0 60px;
+    }
+    .cta-section h2 {
+      font-size: clamp(1.6rem, 4vw, 2.6rem);
+      font-weight: 900;
+      color: #f0f4f8;
+      margin-bottom: 12px;
+    }
+    .cta-question {
+      font-size: clamp(1.8rem, 5vw, 3.2rem);
+      font-weight: 900;
+      background: linear-gradient(135deg, #f0f4f8, #3dd6c8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin: 24px 0 40px;
+      line-height: 1.2;
+    }
+    .action-items {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin: 40px 0;
+    }
+    @media (max-width: 640px) { .action-items { grid-template-columns: 1fr; } }
+    .action-item {
+      background: rgba(61,214,200,.04);
+      border: 1px solid rgba(61,214,200,.12);
+      border-radius: 12px;
+      padding: 24px 20px;
+      font-size: .92rem;
+      color: #a0b0c0;
+      line-height: 1.5;
+    }
+    .action-item strong { color: #3dd6c8; }
+
+    /* ── PDF Download ─────────────────────────────────────── */
+    .download-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 32px;
+      background: linear-gradient(135deg, #c9952c, #e8c460);
+      color: #0a0e1a;
+      font-weight: 700;
+      font-size: .95rem;
+      text-decoration: none;
+      border-radius: 8px;
+      transition: transform .2s, box-shadow .2s;
+      margin-top: 20px;
+    }
+    .download-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(201,149,44,.25);
+    }
+    .download-btn svg { width: 18px; height: 18px; }
+
+    /* ── Slide Viewer ─────────────────────────────────────── */
+    .slide-viewer {
+      margin: 48px 0;
+      background: rgba(255,255,255,.02);
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: 16px;
+      overflow: hidden;
+    }
+    .slide-viewer-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 24px;
+      border-bottom: 1px solid rgba(255,255,255,.06);
+    }
+    .slide-viewer-header .slide-counter {
+      font-size: .85rem;
+      color: #6a7a8a;
+      font-weight: 600;
+    }
+    .slide-viewer-header .slide-nav {
+      display: flex;
+      gap: 8px;
+    }
+    .slide-nav button {
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.08);
+      color: #8899aa;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: .82rem;
+      font-weight: 600;
+      transition: all .2s;
+    }
+    .slide-nav button:hover { background: rgba(61,214,200,.1); color: #3dd6c8; border-color: rgba(61,214,200,.2); }
+    .slide-nav button:disabled { opacity: .3; cursor: not-allowed; }
+    .slide-display {
+      padding: 16px;
+      display: flex;
+      justify-content: center;
+      background: #060a14;
+    }
+    .slide-display img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 4px;
+      display: block;
+    }
+
+    /* ── Footer ───────────────────────────────────────────── */
+    footer {
+      border-top: 1px solid rgba(255,255,255,.06);
+      padding: 32px 0;
+      text-align: center;
+      font-size: .8rem;
+      color: #3a4a5a;
+    }
+    footer a { color: #3dd6c8; text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* ── Divider ──────────────────────────────────────────── */
+    .section-divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,.06), transparent);
+      margin: 0;
+      border: none;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ════════════════════════════════════════════════════════ -->
+  <!-- HERO                                                     -->
+  <!-- ════════════════════════════════════════════════════════ -->
+  <header class="hero">
+    <div class="container">
+      <div class="series-badge">The AI Trap Series</div>
+      <h1>The Delegation <span>Trap.</span></h1>
+      <p class="subtitle">Your retry loops are treating irreversible failures as a <strong class="white">feature</strong>.</p>
+      <p class="advice-tag">Counter-Intuitive Advice #5 &middot; Series 2, Part 5</p>
+    </div>
+  </header>
+
+  <hr class="section-divider" />
+
+  <!-- ════════════════════════════════════════════════════════ -->
+  <!-- SLIDE VIEWER                                             -->
+  <!-- ════════════════════════════════════════════════════════ -->
+  <section class="section">
+    <div class="container">
+      <h2 class="section-heading">Visual Deck</h2>
+      <p class="section-sub">Browse the original presentation slides</p>
+
+      <div class="slide-viewer" id="slideViewer">
+        <div class="slide-viewer-header">
+          <span class="slide-counter">Slide <span id="currentSlide">1</span> of 7</span>
+          <div class="slide-nav">
+            <button id="prevBtn" onclick="changeSlide(-1)" disabled>&larr; Prev</button>
+            <button id="nextBtn" onclick="changeSlide(1)">Next &rarr;</button>
+          </div>
+        </div>
+        <div class="slide-display">
+          <img id="slideImg" src="slide_1.jpg" alt="Slide 1" />
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <hr class="section-divider" />
+
+  <!-- ════════════════════════════════════════════════════════ -->
+  <!-- SECTION 1 — THE PROBLEM                                 -->
+  <!-- ════════════════════════════════════════════════════════ -->
+  <section class="section">
+    <div class="container">
+      <h2 class="section-heading">Are Your AI Retry Loops a Safety Net&mdash;or a Systemic Flaw?</h2>
+      <hr class="gold-rule" />
+
+      <div class="compare-grid">
+        <div class="compare-card user">
+          <h3>The User</h3>
+          <ul>
+            <li><span class="arrow">&rarr;</span> Task Fails &rarr; Retry</li>
+            <li><span class="arrow">&rarr;</span> Task Fails &rarr; Retry</li>
+            <li><span class="arrow">&rarr;</span> Task Fails &rarr; Retry</li>
+          </ul>
+          <p class="tag">Treats all failures as equal.</p>
+        </div>
+        <div class="compare-card architect">
+          <h3>The Architect</h3>
+          <ul>
+            <li><span class="arrow">&rarr;</span> Task Fails &rarr; Triage Risk</li>
+            <li><span class="arrow">&rarr;</span> Reversible? &rarr; Auto-Retry</li>
+            <li><span class="arrow">&rarr;</span> Irreversible? &rarr; <strong class="gold">HALT</strong></li>
+          </ul>
+          <p class="tag">Treats failures with surgical precision.</p>
+        </div>
+      </div>
+
+      <blockquote>
+        &ldquo;Every production AI system is already a delegation system. The question is whether yours is intelligent.&rdquo;
+        <cite>&mdash; Toma&scaron;ev, Franklin &amp; Osindero, Google DeepMind, 2026</cite>
+      </blockquote>
+    </div>
+  </section>
+
+  <hr class="section-divider" />
+
+  <!-- ════════════════════════════════════════════════════════ -->
+  <!-- SECTION 2 — THE MATRIX                                  -->
+  <!-- ════════════════════════════════════════════════════════ -->
+  <section class="section">
+    <div class="container">
+      <h2 class="section-heading">The Reversibility &times; Criticality Matrix</h2>
+      <p class="section-sub">The master variable of delegation design</p>
+      <hr class="gold-rule" />
+
+      <div class="matrix-wrapper">
+        <table class="matrix">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Low Criticality</th>
+              <th>High Criticality</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th class="row-label" style="writing-mode:vertical-lr; transform:rotate(180deg); color:#3dd6c8;">Reversible</th>
+              <td>Auto-Retry + Log</td>
+              <td>Notify Human + Retry</td>
+            </tr>
+            <tr>
+              <th class="row-label" style="writing-mode:vertical-lr; transform:rotate(180deg); color:#e74c3c;">Irreversible</th>
+              <td>Human Approval<br/>BEFORE Execution</td>
+              <td class="danger">IMMEDIATE HALT<br/>+ ESCALATE</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p style="font-size:.92rem; color:#8899aa; margin-top:16px;">
+        Reversibility is the master variable. Five independent components of your delegation system all key off this single axis.
+      </p>
+    </div>
+  </section>
+
+  <hr class="section-divider" />
+
+  <!-- ════════════════════════════════════════════════════════ -->
+  <!-- SECTION 3 — CASCADE FAILURE                              -->
+  <!-- ════════════════════════════════════════════════════════ -->
+  <section class="section">
+    <div class="container">
+      <h2 class="section-heading">The Anatomy of a Cascade Failure</h2>
+      <p class="section-sub">What happens when you auto-retry the unretryable</p>
+      <hr class="gold-rule" />
+
+      <div class="flow-steps">
+        <div class="flow-step">
+          <div class="step-num">1</div>
+          <p>Irreversible task fails silently</p>
+        </div>
+        <div class="flow-step">
+          <div class="step-num">2</div>
+          <p>System auto-retries, compounding error</p>
+        </div>
+        <div class="flow-step">
+          <div class="step-num">3</div>
+          <p>Downstream agents inherit corrupted state</p>
+        </div>
+        <div class="flow-step">
+          <div class="step-num">4</div>
+          <p>Catastrophic failure with no audit trail</p>
+        </div>
+      </div>
+
+      <blockquote>
+        This is not a hypothetical. It is the default behavior of most production multi-agent systems today.
+      </blockquote>
+    </div>
+  </section>
+
+  <hr class="section-divider" />
+
+  <!-- ════════════════════════════════════════════════════════ -->
+  <!-- SECTION 4 — THE FIX                                     -->
+  <!-- ════════════════════════════════════════════════════════ -->
+  <section class="section">
+    <div class="container">
+      <h2 class="section-heading">The Architect&rsquo;s Fix: Pre-Execution Triage</h2>
+      <p class="section-sub">Two fields that change everything</p>
+      <hr class="gold-rule" />
+
+      <div class="code-block">
+<pre><span class="kw">def</span> <span class="fn">triage_failure_response</span>(<span class="var">task</span>, <span class="var">failure_event</span>):
+    <span class="var">rev</span>  <span class="op">=</span> task.reversibility
+    <span class="var">crit</span> <span class="op">=</span> task.criticality
+
+    <span class="kw">if not</span> <span class="var">rev</span> <span class="kw">and</span> <span class="var">crit</span> <span class="kw">in</span> (<span class="str">"high"</span>, <span class="str">"critical"</span>):
+        <span class="kw">return</span> <span class="ret">Action.HALT_AND_ESCALATE_TO_HUMAN</span>
+    <span class="kw">if not</span> <span class="var">rev</span> <span class="kw">and</span> <span class="var">crit</span> <span class="op">==</span> <span class="str">"medium"</span>:
+        <span class="kw">return</span> <span class="ret">Action.REQUIRE_HUMAN_APPROVAL_BEFORE_RETRY</span>
+    <span class="kw">if</span> <span class="var">rev</span> <span class="kw">and</span> <span class="var">crit</span> <span class="kw">in</span> (<span class="str">"high"</span>, <span class="str">"critical"</span>):
+        <span class="kw">return</span> <span class="ret">Action.NOTIFY_HUMAN_THEN_RETRY</span>
+    <span class="kw">return</span> <span class="ret">Action.AUTO_RETRY_WITH_LOG</span></pre>
+      </div>
+
+      <div class="code-annotation circuit">
+        <span class="label">Circuit Breaker &mdash;</span>
+        <span style="font-size:.88rem; color:#a0b0c0;">The <code style="color:#e8c460;">HALT_AND_ESCALATE_TO_HUMAN</code> path is the circuit breaker that prevents cascade failure.</span>
+      </div>
+      <div class="code-annotation only">
+        <span class="label">Safe Default &mdash;</span>
+        <span style="font-size:.88rem; color:#a0b0c0;"><code style="color:#3dd6c8;">AUTO_RETRY_WITH_LOG</code> is the <strong>only</strong> scenario where blind auto-retry is acceptable.</span>
+      </div>
+    </div>
+  </section>
+
+  <hr class="section-divider" />
+
+  <!-- ════════════════════════════════════════════════════════ -->
+  <!-- CTA                                                      -->
+  <!-- ════════════════════════════════════════════════════════ -->
+  <section class="cta-section">
+    <div class="container">
+      <h2>Stop Treating All Failures as Equal</h2>
+      <p class="section-sub" style="margin-bottom:0;">Before you delegate another task, ask:</p>
+      <p class="cta-question">Can This Be Undone?</p>
+
+      <div class="action-items">
+        <div class="action-item">
+          <strong>1.</strong> Add <strong>reversibility</strong> and <strong>criticality</strong> to every task spec.
+        </div>
+        <div class="action-item">
+          <strong>2.</strong> Implement the <strong>Triage Matrix</strong> as a pre-execution gate.
+        </div>
+        <div class="action-item">
+          <strong>3.</strong> Build for <strong>accountability</strong>, not just capability.
+        </div>
+      </div>
+
+      <blockquote>
+        &ldquo;The Architect doesn&rsquo;t just build AI systems. They build systems that know when to stop.&rdquo;
+        <cite>&mdash; Toma&scaron;ev, Franklin &amp; Osindero, Google DeepMind, 2026</cite>
+      </blockquote>
+
+      <a class="download-btn" href="TheAIDelegationCrisisAreYouBuildingforAccountability.pdf" download>
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V3"/></svg>
+        Download Original PDF
+      </a>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════════════════════ -->
+  <!-- FOOTER                                                   -->
+  <!-- ════════════════════════════════════════════════════════ -->
+  <footer>
+    <div class="container">
+      <p>The AI Trap Series &middot; Counter-Intuitive Advice #5 &middot; <a href="https://github.com/haremantra/vibe-coder-assessment" target="_blank" rel="noopener">View on GitHub</a></p>
+    </div>
+  </footer>
+
+  <!-- ════════════════════════════════════════════════════════ -->
+  <!-- SCRIPTS                                                  -->
+  <!-- ════════════════════════════════════════════════════════ -->
+  <script>
+    let current = 1;
+    const total = 7;
+    function changeSlide(dir) {
+      current += dir;
+      if (current < 1) current = 1;
+      if (current > total) current = total;
+      document.getElementById('slideImg').src = 'slide_' + current + '.jpg';
+      document.getElementById('slideImg').alt = 'Slide ' + current;
+      document.getElementById('currentSlide').textContent = current;
+      document.getElementById('prevBtn').disabled = current === 1;
+      document.getElementById('nextBtn').disabled = current === total;
+    }
+  </script>
+
+</body>
+</html>
